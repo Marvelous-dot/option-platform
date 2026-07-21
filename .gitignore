@@ -1,0 +1,53 @@
+# Bytecode / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+*.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+iv_history.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Audit / debug scripts (not part of production)
+audit*.py
+_audit*.py
+_run*.py
+_run*.sh
+check_health.py
+data_repair.py
+local_audit.py
+self_heal*.py
+self_heal*.sh
+quick_check.py
+code_optimize.py
+_*.py
+_*.sh
+start.sh
+run_self_heal.sh
+test_simple.py
+run_audit*.py
+
+# Patent draft
+patent-draft/
+
+# OS
+.DS_Store
+Thumbs.db
