@@ -1,0 +1,19 @@
+[Unit]
+Description=Option Platform V2 public HTTP service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/option-platform-v2/backend
+ExecStart=/usr/bin/python3.11 -m uvicorn main:app --host 0.0.0.0 --port 80 --no-proxy-headers
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

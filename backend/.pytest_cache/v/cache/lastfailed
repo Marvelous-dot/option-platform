@@ -1,0 +1,7 @@
+{
+  "tests/test_data_integrity.py::test_mismatched_quote_identity_is_unavailable": true,
+  "tests/test_kline.py::test_kline_payload_sorted_and_sliced": true,
+  "tests/test_kline.py::test_kline_params_and_routes": true,
+  "tests/test_kline_adapter.py::test_service_takes_latest_sorted_days": true,
+  "tests/test_strategy_page.py::test_strategy_page_has_no_corrupt_text": true
+}

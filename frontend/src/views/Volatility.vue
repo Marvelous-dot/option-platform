@@ -1,1158 +1,358 @@
-<script setup>
-import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
-import Surface3D from '../components/Surface3D.vue'
-import DashboardChart from '../components/DashboardChart.vue'
-import DashboardPanel from '../components/DashboardPanel.vue'
-import { getCssVars } from '@/utils/cssVar'
-
-// ── State ──
-const loading = ref(true)
-const loadingKline = ref(false)
-const loadingSurface = ref(false)
-const loadingSmile = ref(false)
-const loadingTerm = ref(false)
-const loading3D = ref(false)
-const loadingDashboard = ref(false)
-const loadingDashboardPanel = ref(false)
-const targets = ref([])
-const selectedTarget = ref('510050')
-const expiries = ref([])
-const selectedExpiry = ref('')
-const activeTab = ref('dashboardPanel') // dashboardPanel | dashboard | kline | surface | smile | term | surface3d
-
-// Data
-const klineData = ref([])
-const surfaceData = ref([])
-const smileData = ref({ calls: [], puts: [], spot_price: null })
-const termData = ref([])
-const surface3dData = ref({ strikes: [], expiries: [], grid: { call: [], put: [] }, spot_price: 0, min_iv: 0, max_iv: 0 })
-const surface3dType = ref('call')
-const dashboardData = ref([])
-const dashboardLatest = ref(null)
-const ivStats = ref({ current: 0, high: 0, low: 0, avg: 0, change: 0 })
-
-// Chart refs
-const klineChart = ref(null)
-const surfaceChart = ref(null)
-const smileChart = ref(null)
-const termChart = ref(null)
-let refreshTimer = null
-
-// ── Target options ──
-const targetOptions = [
-  { code: '510050', name: '上证50ETF' },
-  { code: '510300', name: '沪深300ETF' },
-  { code: '510500', name: '中证500ETF' },
-  { code: '588000', name: '科创50ETF' },
-  { code: '588080', name: '科创50ETF易方达' },
-]
-
-const selectedTargetName = computed(() => {
-  const t = targetOptions.find(t => t.code === selectedTarget.value)
-  return t ? t.name : ''
-})
-
-// ── API calls ──
-const fetchTargets = async () => {
-  try {
-    const res = await fetch('/api/targets')
-    const data = await res.json()
-    targets.value = data.targets || []
-  } catch (e) {
-    console.error('fetchTargets:', e)
-  }
-}
-
-const fetchExpiries = async (targetCode) => {
-  try {
-    const res = await fetch(`/api/volatility/expiries/${targetCode}`)
-    const data = await res.json()
-    expiries.value = data.expiries || []
-    if (expiries.value.length > 0 && !selectedExpiry.value) {
-      selectedExpiry.value = expiries.value[0]
-    }
-  } catch (e) {
-    console.error('fetchExpiries:', e)
-  }
-}
-
-const fetchKline = async () => {
-  if (loadingKline.value || !selectedTarget.value) return
-  loadingKline.value = true
-  try {
-    const res = await fetch(`/api/volatility/kline/${selectedTarget.value}`)
-    const data = await res.json()
-    klineData.value = data.data || []
-    computeIvStats()
-    nextTick(() => renderKlineChart())
-  } catch (e) {
-    console.error('fetchKline:', e)
-  } finally {
-    loadingKline.value = false
-  }
-}
-
-const fetchSurface = async () => {
-  if (loadingSurface.value || !selectedExpiry.value) return
-  loadingSurface.value = true
-  try {
-    const res = await fetch(`/api/volatility/surface/${selectedTarget.value}?expiry=${selectedExpiry.value}`)
-    const data = await res.json()
-    surfaceData.value = data.data || []
-    nextTick(() => renderSurfaceChart())
-  } catch (e) {
-    console.error('fetchSurface:', e)
-  } finally {
-    loadingSurface.value = false
-  }
-}
-
-const fetchSmile = async () => {
-  if (loadingSmile.value || !selectedExpiry.value) return
-  loadingSmile.value = true
-  try {
-    const res = await fetch(`/api/volatility/smile/${selectedTarget.value}?expiry=${selectedExpiry.value}`)
-    const data = await res.json()
-    smileData.value = { calls: data.calls || [], puts: data.puts || [], spot_price: data.spot_price }
-    nextTick(() => renderSmileChart())
-  } catch (e) {
-    console.error('fetchSmile:', e)
-  } finally {
-    loadingSmile.value = false
-  }
-}
-
-const fetchTerm = async () => {
-  if (loadingTerm.value || !selectedTarget.value) return
-  loadingTerm.value = true
-  try {
-    const res = await fetch(`/api/volatility/term/${selectedTarget.value}`)
-    const data = await res.json()
-    termData.value = data.data || []
-    nextTick(() => renderTermChart())
-  } catch (e) {
-    console.error('fetchTerm:', e)
-  } finally {
-    loadingTerm.value = false
-  }
-}
-
-const fetchSurface3D = async () => {
-  try {
-    const res = await fetch(`/api/volatility/surface3d/${selectedTarget.value}`)
-    const data = await res.json()
-    surface3dData.value = data || { strikes: [], expiries: [], grid: { call: [], put: [] }, spot_price: 0, min_iv: 0, max_iv: 0 }
-  } catch (e) {
-    console.error('fetchSurface3D:', e)
-  }
-}
-
-const fetchDashboard = async () => {
-  try {
-    const res = await fetch(`/api/dashboard/series/${selectedTarget.value}?days=90`)
-    const data = await res.json()
-    dashboardData.value = data.data || []
-    dashboardLatest.value = data.latest || null
-  } catch (e) {
-    console.error('fetchDashboard:', e)
-  }
-}
-
-const loadAllData = async () => {
-  loading.value = true
-  await fetchTargets()
-  await fetchExpiries(selectedTarget.value)
-  await Promise.all([fetchKline(), fetchSurface(), fetchSmile(), fetchTerm(), fetchSurface3D(), fetchDashboard()])
-  loading.value = false
-}
-
-// ── IV Stats ──
-const computeIvStats = () => {
-  const data = klineData.value
-  if (!data.length) {
-    ivStats.value = { current: 0, high: 0, low: 0, avg: 0, change: 0 }
-    return
-  }
-  const ivs = data.map(d => d.iv).filter(v => v > 0)
-  if (!ivs.length) return
-  const current = ivs[ivs.length - 1]
-  const prev = ivs.length > 1 ? ivs[ivs.length - 2] : current
-  ivStats.value = {
-    current: (current * 100).toFixed(2),
-    high: (Math.max(...ivs) * 100).toFixed(2),
-    low: (Math.min(...ivs) * 100).toFixed(2),
-    avg: (ivs.reduce((a, b) => a + b, 0) / ivs.length * 100).toFixed(2),
-    change: prev !== 0 ? ((current - prev) / prev * 100).toFixed(2) : '0.00',
-  }
-}
-
-// ── Canvas Charts ──
-function renderKlineChart() {
-  const canvas = klineChart.value
-  if (!canvas || !klineData.value.length) return
-  const ctx = canvas.getContext('2d')
-  const vars = getCssVars()
-  const dpr = window.devicePixelRatio || 1
-  const rect = canvas.getBoundingClientRect()
-  canvas.width = rect.width * dpr
-  canvas.height = rect.height * dpr
-  ctx.scale(dpr, dpr)
-  const W = rect.width, H = rect.height
-  const data = klineData.value
-
-  const ivs = data.map(d => d.iv * 100)
-  const minIV = Math.min(...ivs) * 0.95
-  const maxIV = Math.max(...ivs) * 1.05
-  const range = maxIV - minIV || 1
-
-  const pad = { top: 24, right: 50, bottom: 32, left: 56 }
-  const cw = W - pad.left - pad.right
-  const ch = H - pad.top - pad.bottom
-
-  const xOf = (i) => pad.left + i / Math.max(data.length - 1, 1) * cw
-  const yOf = (v) => pad.top + ch - (v - minIV) / range * ch
-
-  // Clear
-  ctx.fillStyle = vars.bgCard
-  ctx.fillRect(0, 0, W, H)
-
-  // Grid
-  ctx.strokeStyle = vars.border
-  ctx.lineWidth = 1
-  for (let i = 0; i <= 5; i++) {
-    const y = pad.top + ch * i / 5
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke()
-  }
-  for (let i = 0; i <= 6; i++) {
-    const x = pad.left + cw * i / 6
-    ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, H - pad.bottom); ctx.stroke()
-  }
-
-  // Y labels
-  ctx.fillStyle = vars.textDim
-  ctx.font = '10px var(--font-mono)'
-  ctx.textAlign = 'right'
-  for (let i = 0; i <= 5; i++) {
-    const v = maxIV - range * i / 5
-    const y = pad.top + ch * i / 5
-    ctx.fillText(v.toFixed(1) + '%', pad.left - 8, y + 3)
-  }
-
-  // X labels (dates)
-  ctx.textAlign = 'center'
-  ctx.fillStyle = vars.textDim
-  const step = Math.max(1, Math.floor(data.length / 6))
-  for (let i = 0; i < data.length; i += step) {
-    const x = xOf(i)
-    const ts = data[i].ts
-    const date = ts ? ts.slice(5, 10) : ''
-    ctx.fillText(date, x, H - pad.bottom + 14)
-  }
-
-  // IV area fill
-  ctx.beginPath()
-  ctx.moveTo(xOf(0), yOf(ivs[0]))
-  for (let i = 1; i < ivs.length; i++) {
-    ctx.lineTo(xOf(i), yOf(ivs[i]))
-  }
-  ctx.lineTo(xOf(ivs.length - 1), pad.top + ch)
-  ctx.lineTo(xOf(0), pad.top + ch)
-  ctx.closePath()
-  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch)
-  grad.addColorStop(0, 'rgba(240,160,48,0.25)')
-  grad.addColorStop(1, 'rgba(240,160,48,0.02)')
-  ctx.fillStyle = grad
-  ctx.fill()
-
-  // IV line
-  ctx.beginPath()
-  ctx.moveTo(xOf(0), yOf(ivs[0]))
-  for (let i = 1; i < ivs.length; i++) {
-    ctx.lineTo(xOf(i), yOf(ivs[i]))
-  }
-  ctx.strokeStyle = vars.accent
-  ctx.lineWidth = 2
-  ctx.shadowColor = vars.accent
-  ctx.shadowBlur = 6
-  ctx.stroke()
-  ctx.shadowBlur = 0
-
-  // Current dot
-  const lastX = xOf(ivs.length - 1)
-  const lastY = yOf(ivs[ivs.length - 1])
-  ctx.beginPath()
-  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2)
-  ctx.fillStyle = vars.accent
-  ctx.fill()
-  ctx.strokeStyle = vars.bgPrimary
-  ctx.lineWidth = 2
-  ctx.stroke()
-
-  // Title
-  ctx.fillStyle = vars.textMuted
-  ctx.font = '11px var(--font-sans)'
-  ctx.textAlign = 'left'
-  ctx.fillText('IV走势', pad.left, 16)
-}
-
-function renderSurfaceChart() {
-  const canvas = surfaceChart.value
-  if (!canvas || !surfaceData.value.length) return
-  const ctx = canvas.getContext('2d')
-  const vars = getCssVars()
-  const dpr = window.devicePixelRatio || 1
-  const rect = canvas.getBoundingClientRect()
-  canvas.width = rect.width * dpr
-  canvas.height = rect.height * dpr
-  ctx.scale(dpr, dpr)
-  const W = rect.width, H = rect.height
-  const data = surfaceData.value
-
-  const calls = data.filter(d => d.option_type === '认购').sort((a, b) => a.strike - b.strike)
-  const puts = data.filter(d => d.option_type === '认沽').sort((a, b) => a.strike - b.strike)
-
-  const allIVs = data.map(d => d.iv * 100)
-  const minIV = Math.min(...allIVs) * 0.95
-  const maxIV = Math.max(...allIVs) * 1.05
-  const range = maxIV - minIV || 1
-
-  const allStrikes = [...new Set(data.map(d => d.strike))].sort((a, b) => a - b)
-  const minStrike = Math.min(...allStrikes)
-  const maxStrike = Math.max(...allStrikes)
-  const strikeRange = maxStrike - minStrike || 1
-
-  const pad = { top: 24, right: 50, bottom: 32, left: 56 }
-  const cw = W - pad.left - pad.right
-  const ch = H - pad.top - pad.bottom
-
-  const xOf = (s) => pad.left + (s - minStrike) / strikeRange * cw
-  const yOf = (v) => pad.top + ch - (v - minIV) / range * ch
-
-  ctx.fillStyle = vars.bgCard
-  ctx.fillRect(0, 0, W, H)
-
-  // Grid
-  ctx.strokeStyle = vars.border
-  ctx.lineWidth = 1
-  for (let i = 0; i <= 5; i++) {
-    const y = pad.top + ch * i / 5
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke()
-  }
-
-  // Y labels
-  ctx.fillStyle = vars.textDim
-  ctx.font = '10px var(--font-mono)'
-  ctx.textAlign = 'right'
-  for (let i = 0; i <= 5; i++) {
-    const v = maxIV - range * i / 5
-    const y = pad.top + ch * i / 5
-    ctx.fillText(v.toFixed(1) + '%', pad.left - 8, y + 3)
-  }
-
-  // X labels
-  ctx.textAlign = 'center'
-  const strikeStep = Math.max(1, Math.floor(allStrikes.length / 5))
-  for (let i = 0; i < allStrikes.length; i += strikeStep) {
-    const x = xOf(allStrikes[i])
-    ctx.fillText(allStrikes[i].toFixed(2), x, H - pad.bottom + 14)
-  }
-
-  // Call line
-  if (calls.length > 1) {
-    ctx.beginPath()
-    ctx.moveTo(xOf(calls[0].strike), yOf(calls[0].iv * 100))
-    for (let i = 1; i < calls.length; i++) {
-      ctx.lineTo(xOf(calls[i].strike), yOf(calls[i].iv * 100))
-    }
-    ctx.strokeStyle = 'vars.up'
-    ctx.lineWidth = 2
-    ctx.stroke()
-  }
-
-  // Put line
-  if (puts.length > 1) {
-    ctx.beginPath()
-    ctx.moveTo(xOf(puts[0].strike), yOf(puts[0].iv * 100))
-    for (let i = 1; i < puts.length; i++) {
-      ctx.lineTo(xOf(puts[i].strike), yOf(puts[i].iv * 100))
-    }
-    ctx.strokeStyle = 'vars.down'
-    ctx.lineWidth = 2
-    ctx.stroke()
-  }
-
-  // Legend
-  ctx.font = '11px var(--font-sans)'
-  ctx.fillStyle = 'vars.up'
-  ctx.textAlign = 'left'
-  ctx.fillText('■ 认购', pad.left, 16)
-  ctx.fillStyle = 'vars.down'
-  ctx.fillText('■ 认沽', pad.left + 70, 16)
-  ctx.fillStyle = vars.textMuted
-  ctx.fillText('波动率曲面', pad.left + 140, 16)
-}
-
-function renderSmileChart() {
-  const canvas = smileChart.value
-  if (!canvas) return
-  const ctx = canvas.getContext('2d')
-  const vars = getCssVars()
-  const dpr = window.devicePixelRatio || 1
-  const rect = canvas.getBoundingClientRect()
-  canvas.width = rect.width * dpr
-  canvas.height = rect.height * dpr
-  ctx.scale(dpr, dpr)
-  const W = rect.width, H = rect.height
-
-  const calls = smileData.value.calls || []
-  const puts = smileData.value.puts || []
-  const spotPrice = smileData.value.spot_price
-
-  if (!calls.length && !puts.length) {
-    ctx.fillStyle = vars.bgCard
-    ctx.fillRect(0, 0, W, H)
-    ctx.fillStyle = vars.textMuted
-    ctx.font = '13px var(--font-sans)'
-    ctx.textAlign = 'center'
-    ctx.fillText('暂无数据', W / 2, H / 2)
-    return
-  }
-
-  const allData = [...calls, ...puts]
-  const allIVs = allData.map(d => d.iv * 100)
-  const minIV = Math.min(...allIVs) * 0.95
-  const maxIV = Math.max(...allIVs) * 1.05
-  const range = maxIV - minIV || 1
-
-  const allStrikes = [...new Set(allData.map(d => d.strike))].sort((a, b) => a - b)
-  const minStrike = Math.min(...allStrikes)
-  const maxStrike = Math.max(...allStrikes)
-  const strikeRange = maxStrike - minStrike || 1
-
-  const pad = { top: 24, right: 50, bottom: 32, left: 56 }
-  const cw = W - pad.left - pad.right
-  const ch = H - pad.top - pad.bottom
-
-  const xOf = (s) => pad.left + (s - minStrike) / strikeRange * cw
-  const yOf = (v) => pad.top + ch - (v - minIV) / range * ch
-
-  ctx.fillStyle = vars.bgCard
-  ctx.fillRect(0, 0, W, H)
-
-  // Grid
-  ctx.strokeStyle = vars.border
-  ctx.lineWidth = 1
-  for (let i = 0; i <= 5; i++) {
-    const y = pad.top + ch * i / 5
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke()
-  }
-
-  // Y labels
-  ctx.fillStyle = vars.textDim
-  ctx.font = '10px var(--font-mono)'
-  ctx.textAlign = 'right'
-  for (let i = 0; i <= 5; i++) {
-    const v = maxIV - range * i / 5
-    const y = pad.top + ch * i / 5
-    ctx.fillText(v.toFixed(1) + '%', pad.left - 8, y + 3)
-  }
-
-  // X labels
-  ctx.textAlign = 'center'
-  const strikeStep = Math.max(1, Math.floor(allStrikes.length / 5))
-  for (let i = 0; i < allStrikes.length; i += strikeStep) {
-    const x = xOf(allStrikes[i])
-    ctx.fillText(allStrikes[i].toFixed(2), x, H - pad.bottom + 14)
-  }
-
-  // Spot price line
-  if (spotPrice) {
-    const sx = xOf(spotPrice)
-    if (sx >= pad.left && sx <= W - pad.right) {
-      ctx.strokeStyle = 'rgba(240,160,48,0.4)'
-      ctx.lineWidth = 1
-      ctx.setLineDash([4, 3])
-      ctx.beginPath(); ctx.moveTo(sx, pad.top); ctx.lineTo(sx, H - pad.bottom); ctx.stroke()
-      ctx.setLineDash([])
-      ctx.fillStyle = 'vars.accent'
-      ctx.font = '9px var(--font-mono)'
-      ctx.textAlign = 'center'
-      ctx.fillText('现价', sx, pad.top - 6)
-    }
-  }
-
-  // Call smile
-  if (calls.length > 1) {
-    ctx.beginPath()
-    const sorted = [...calls].sort((a, b) => a.strike - b.strike)
-    ctx.moveTo(xOf(sorted[0].strike), yOf(sorted[0].iv * 100))
-    for (let i = 1; i < sorted.length; i++) {
-      ctx.lineTo(xOf(sorted[i].strike), yOf(sorted[i].iv * 100))
-    }
-    ctx.strokeStyle = 'vars.up'
-    ctx.lineWidth = 2
-    ctx.stroke()
-    // Dots
-    for (const c of sorted) {
-      ctx.beginPath()
-      ctx.arc(xOf(c.strike), yOf(c.iv * 100), 3, 0, Math.PI * 2)
-      ctx.fillStyle = 'vars.up'
-      ctx.fill()
-    }
-  }
-
-  // Put smile
-  if (puts.length > 1) {
-    ctx.beginPath()
-    const sorted = [...puts].sort((a, b) => a.strike - b.strike)
-    ctx.moveTo(xOf(sorted[0].strike), yOf(sorted[0].iv * 100))
-    for (let i = 1; i < sorted.length; i++) {
-      ctx.lineTo(xOf(sorted[i].strike), yOf(sorted[i].iv * 100))
-    }
-    ctx.strokeStyle = 'vars.down'
-    ctx.lineWidth = 2
-    ctx.stroke()
-    for (const p of sorted) {
-      ctx.beginPath()
-      ctx.arc(xOf(p.strike), yOf(p.iv * 100), 3, 0, Math.PI * 2)
-      ctx.fillStyle = 'vars.down'
-      ctx.fill()
-    }
-  }
-
-  // Legend
-  ctx.font = '11px var(--font-sans)'
-  ctx.fillStyle = 'vars.up'
-  ctx.textAlign = 'left'
-  ctx.fillText('● 认购', pad.left, 16)
-  ctx.fillStyle = 'vars.down'
-  ctx.fillText('● 认沽', pad.left + 70, 16)
-  ctx.fillStyle = vars.textMuted
-  ctx.fillText('波动率微笑', pad.left + 140, 16)
-}
-
-function renderTermChart() {
-  const canvas = termChart.value
-  if (!canvas || !termData.value.length) return
-  const ctx = canvas.getContext('2d')
-  const vars = getCssVars()
-  const dpr = window.devicePixelRatio || 1
-  const rect = canvas.getBoundingClientRect()
-  canvas.width = rect.width * dpr
-  canvas.height = rect.height * dpr
-  ctx.scale(dpr, dpr)
-  const W = rect.width, H = rect.height
-  const data = termData.value
-
-  const ivs = data.map(d => d.atm_iv * 100)
-  const minIV = Math.min(...ivs) * 0.95
-  const maxIV = Math.max(...ivs) * 1.05
-  const range = maxIV - minIV || 1
-
-  const pad = { top: 24, right: 50, bottom: 32, left: 56 }
-  const cw = W - pad.left - pad.right
-  const ch = H - pad.top - pad.bottom
-
-  const xOf = (i) => pad.left + i / Math.max(data.length - 1, 1) * cw
-  const yOf = (v) => pad.top + ch - (v - minIV) / range * ch
-
-  ctx.fillStyle = vars.bgCard
-  ctx.fillRect(0, 0, W, H)
-
-  // Grid
-  ctx.strokeStyle = vars.border
-  ctx.lineWidth = 1
-  for (let i = 0; i <= 5; i++) {
-    const y = pad.top + ch * i / 5
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke()
-  }
-
-  // Y labels
-  ctx.fillStyle = vars.textDim
-  ctx.font = '10px var(--font-mono)'
-  ctx.textAlign = 'right'
-  for (let i = 0; i <= 5; i++) {
-    const v = maxIV - range * i / 5
-    const y = pad.top + ch * i / 5
-    ctx.fillText(v.toFixed(1) + '%', pad.left - 8, y + 3)
-  }
-
-  // X labels
-  ctx.textAlign = 'center'
-  for (let i = 0; i < data.length; i++) {
-    const x = xOf(i)
-    const exp = data[i].expiry
-    const label = exp ? exp.slice(4, 6) + '/' + exp.slice(6, 8) : ''
-    ctx.fillText(label, x, H - pad.bottom + 14)
-  }
-
-  // Area fill
-  ctx.beginPath()
-  ctx.moveTo(xOf(0), yOf(ivs[0]))
-  for (let i = 1; i < ivs.length; i++) {
-    ctx.lineTo(xOf(i), yOf(ivs[i]))
-  }
-  ctx.lineTo(xOf(ivs.length - 1), pad.top + ch)
-  ctx.lineTo(xOf(0), pad.top + ch)
-  ctx.closePath()
-  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch)
-  grad.addColorStop(0, 'rgba(240,160,48,0.2)')
-  grad.addColorStop(1, 'rgba(240,160,48,0.02)')
-  ctx.fillStyle = grad
-  ctx.fill()
-
-  // Line
-  ctx.beginPath()
-  ctx.moveTo(xOf(0), yOf(ivs[0]))
-  for (let i = 1; i < ivs.length; i++) {
-    ctx.lineTo(xOf(i), yOf(ivs[i]))
-  }
-  ctx.strokeStyle = 'vars.accent'
-  ctx.lineWidth = 2
-  ctx.shadowColor = 'vars.accent'
-  ctx.shadowBlur = 6
-  ctx.stroke()
-  ctx.shadowBlur = 0
-
-  // Dots
-  for (let i = 0; i < ivs.length; i++) {
-    ctx.beginPath()
-    ctx.arc(xOf(i), yOf(ivs[i]), 4, 0, Math.PI * 2)
-    ctx.fillStyle = 'vars.accent'
-    ctx.fill()
-    ctx.strokeStyle = 'vars.bgPrimary'
-    ctx.lineWidth = 2
-    ctx.stroke()
-  }
-
-  // Title
-  ctx.fillStyle = vars.textMuted
-  ctx.font = '11px var(--font-sans)'
-  ctx.textAlign = 'left'
-  ctx.fillText('IV期限结构', pad.left, 16)
-}
-
-// ── Watchers ──
-watch(selectedTarget, async (val) => {
-  selectedExpiry.value = ''
-  await fetchExpiries(val)
-  await loadAllData()
-})
-
-watch(selectedExpiry, async () => {
-  if (activeTab.value === 'kline') await fetchKline()
-  else if (activeTab.value === 'surface') { await fetchSurface(); await fetchSmile() }
-  else if (activeTab.value === 'smile') { await fetchSmile(); await fetchSurface() }
-})
-
-watch(activeTab, async (tab) => {
-  if (tab === 'kline') await fetchKline()
-  else if (tab === 'surface') { await fetchSurface(); await fetchSmile() }
-  else if (tab === 'smile') { await fetchSmile(); await fetchSurface() }
-  else if (tab === 'term') await fetchTerm()
-  else if (tab === 'surface3d') await fetchSurface3D()
-  else if (tab === 'dashboard') await fetchDashboard()
-  else if (tab === 'dashboardPanel') await fetchDashboard()
-})
-
-// ── Lifecycle ──
-onMounted(async () => {
-  await loadAllData()
-  // Auto refresh every 60s
-  refreshTimer = setInterval(async () => {
-    if (activeTab.value === 'kline') await fetchKline()
-    else if (activeTab.value === 'surface') { await fetchSurface(); await fetchSmile() }
-    else if (activeTab.value === 'smile') { await fetchSmile(); await fetchSurface() }
-    else if (activeTab.value === 'term') await fetchTerm()
-    else if (activeTab.value === 'surface3d') await fetchSurface3D()
-    else if (activeTab.value === 'dashboard') await fetchDashboard()
-    else if (activeTab.value === 'dashboardPanel') await fetchDashboard()
-  }, 60000)
-})
-
-onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
-})
-
-// ── Helpers ──
-function fmtPct(v) {
-  if (v == null) return '--'
-  return (Number(v)).toFixed(2) + '%'
-}
-function chgClass(v) {
-  if (v == null) return 'val-neu'
-  return Number(v) >= 0 ? 'val-up' : 'val-down'
-}
-</script>
-
 <template>
-  <div class="vol-page" v-if="!loading">
-    <!-- ═══ TOP BAR ═══ -->
-    <div class="vol-topbar">
-      <div class="vol-title">
-        <span class="vol-title-icon">📊</span>
+  <section class="volatility-page">
+    <div class="page-head">
+      <div class="ph-title">
+        <span class="ph-kicker">VOLATILITY · IV 微笑 / 期限结构 / 跨期对比</span>
         <h1>波动率分析</h1>
+        <p class="ph-desc">IV 为数据源（新浪财经）计算值原样透传，并非本地反推的市场隐含波动率，也未经验证；数据缺失、空值、NaN、负值与 0 均判为无效，过期数据标 stale。</p>
       </div>
-
-      <!-- Target selector -->
-      <div class="vol-controls">
-        <div class="vol-target-tabs">
-          <button
-            v-for="t in targetOptions"
-            :key="t.code"
-            :class="['vol-target-tab', { active: selectedTarget === t.code }]"
-            @click="selectedTarget = t.code"
-          >
-            {{ t.name }}
-          </button>
-        </div>
-
-        <div class="vol-expiry-select" v-if="expiries.length">
-          <label>到期日</label>
-          <select v-model="selectedExpiry" class="vol-select">
-            <option v-for="exp in expiries" :key="exp" :value="exp">
-              {{ exp.slice(0,4) }}-{{ exp.slice(4,6) }}-{{ exp.slice(6,8) }}
-            </option>
-          </select>
-        </div>
+      <div class="ph-actions">
+        <span class="ph-note warn">数据源计算 · 口径未核验</span>
       </div>
     </div>
 
-    <!-- ═══ IV STATS BAR ═══ -->
-    <div class="vol-stats-bar">
-      <div class="vol-stat">
-        <span class="vol-stat-label">当前IV</span>
-        <span class="vol-stat-val accent">{{ ivStats.current }}%</span>
-      </div>
-      <div class="vol-stat">
-        <span class="vol-stat-label">IV变化</span>
-        <span class="vol-stat-val" :class="chgClass(ivStats.change)">{{ ivStats.change }}%</span>
-      </div>
-      <div class="vol-stat">
-        <span class="vol-stat-label">最高</span>
-        <span class="vol-stat-val">{{ ivStats.high }}%</span>
-      </div>
-      <div class="vol-stat">
-        <span class="vol-stat-label">最低</span>
-        <span class="vol-stat-val">{{ ivStats.low }}%</span>
-      </div>
-      <div class="vol-stat">
-        <span class="vol-stat-label">平均</span>
-        <span class="vol-stat-val">{{ ivStats.avg }}%</span>
-      </div>
-      <div class="vol-stat">
-        <span class="vol-stat-label">标的</span>
-        <span class="vol-stat-val">{{ selectedTargetName }}</span>
-      </div>
-    </div>
-
-    <!-- ═══ TAB NAV ═══ -->
-    <div class="vol-tabs">
-      <button :class="['vol-tab', { active: activeTab === 'dashboardPanel' }]" @click="activeTab = 'dashboardPanel'">
-        <span class="vol-tab-icon">📊</span>
-        综合仪表盘
-      </button>
-      <button :class="['vol-tab', { active: activeTab === 'dashboard' }]" @click="activeTab = 'dashboard'">
-        <span class="vol-tab-icon">📈</span>
-        综合走势
-      </button>
-      <button :class="['vol-tab', { active: activeTab === 'kline' }]" @click="activeTab = 'kline'">
-        <span class="vol-tab-icon">📉</span>
-        IV走势
-      </button>
-      <button :class="['vol-tab', { active: activeTab === 'smile' }]" @click="activeTab = 'smile'">
-        <span class="vol-tab-icon">😊</span>
-        波动率微笑
-      </button>
-      <button :class="['vol-tab', { active: activeTab === 'surface3d' }]" @click="activeTab = 'surface3d'">
-        <span class="vol-tab-icon">🏔️</span>
-        3D曲面
-      </button>
-      <button :class="['vol-tab', { active: activeTab === 'surface' }]" @click="activeTab = 'surface'">
-        <span class="vol-tab-icon">📊</span>
-        IV对比
-      </button>
-      <button :class="['vol-tab', { active: activeTab === 'term' }]" @click="activeTab = 'term'">
-        <span class="vol-tab-icon">📅</span>
-        期限结构
+    <div class="controls">
+      <label class="field">标的
+        <select v-model="target" @change="changeTarget">
+          <option v-for="t in targets" :key="t.code" :value="t.code">{{ t.name }}</option>
+        </select>
+      </label>
+      <label class="field">到期日
+        <select v-model="expiry">
+          <option value="">全部到期日</option>
+          <option v-for="e in expiries" :key="e" :value="e">{{ fmtExpiry(e) }}</option>
+        </select>
+      </label>
+      <button class="refresh-btn" type="button" @click="load()" :disabled="loading">
+        {{ loading ? '刷新中…' : '刷新' }}
       </button>
     </div>
 
-    <!-- ═══ CHART AREA ═══ -->
-    <div class="vol-chart-area">
-      <!-- 综合仪表盘 (2x2) -->
-      <div class="vol-chart-panel" v-show="activeTab === 'dashboardPanel'">
-        <div class="vol-chart-header">
-          <h3>综合仪表盘 — {{ selectedTargetName }}</h3>
-          <span class="vol-chart-sub">标的 + HV + IV + PCR · 一屏概览</span>
-        </div>
-        <DashboardPanel :data="dashboardData" :latest="dashboardLatest" :loading="loading" :targetName="selectedTargetName" />
+    <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <p v-else-if="!model && !loading" class="empty">加载中或暂无数据</p>
+
+    <template v-if="selected">
+      <div class="meta-bar">
+        <span>来源：{{ selected.source || 'sina' }}</span>
+        <span>报价时间：{{ formatTs(selected.marketTs) }}</span>
+        <span>获取时间：{{ formatTs(selected.fetchedAt) }}</span>
+        <span class="ts-note">非实时快照</span>
+        <span :class="'status-' + selected.status">{{ statusLabel(selected.status) }}</span>
+        <span v-if="staleFlag" class="warn">过期数据，仅供参考</span>
       </div>
 
-      <!-- 综合走势 -->
-      <div class="vol-chart-panel" v-show="activeTab === 'dashboard'">
-        <div class="vol-chart-header">
-          <h3>综合走势 — {{ selectedTargetName }}</h3>
-          <span class="vol-chart-sub">标的 + HV + IV + PCR</span>
+      <div class="charts">
+        <div class="chart-card">
+          <h2>IV 微笑</h2>
+          <p class="note">横轴：行权价；纵轴：IV（%）。call/put 分别绘制，缺失/无效 IV 留空不补零。</p>
+          <svg viewBox="0 0 650 280" role="img" aria-label="IV 微笑">
+            <g v-for="tick in smileChart.ticks" :key="'xt' + tick.label">
+              <text :x="tick.x" y="255" text-anchor="middle">{{ tick.label }}</text>
+            </g>
+            <g v-for="tick in smileChart.yTicks" :key="'yt' + tick.value">
+              <line :x1="40" :x2="620" :y1="tick.y" :y2="tick.y" class="grid-line" />
+              <text x="36" :y="tick.y + 4" text-anchor="end">{{ formatIV(tick.value) }}</text>
+            </g>
+            <g v-for="series in smileChart.series" :key="series.side">
+              <polyline v-for="seg in series.segments" :key="'seg' + seg" :points="seg"
+                :class="series.side === 'call' ? 'smile-call' : 'smile-put'" />
+              <g v-for="p in series.points" :key="p.option_code">
+                <circle :cx="p.x" :cy="p.y" r="3" :class="`pt-${p.ivStatus || 'unavailable'}`" />
+              </g>
+            </g>
+            <text x="620" y="272" text-anchor="end">行权价</text>
+            <text x="40" y="18">IV（%）</text>
+          </svg>
         </div>
-        <DashboardChart :data="dashboardData" :latest="dashboardLatest" :loading="loading" />
-      </div>
-      <!-- IV KLine -->
-      <div class="vol-chart-panel" v-show="activeTab === 'kline'">
-        <div class="vol-chart-header">
-          <h3>IV走势 — {{ selectedTargetName }} {{ selectedExpiry ? selectedExpiry.slice(4,6) + '/' + selectedExpiry.slice(6,8) : '' }}</h3>
-          <span class="vol-chart-sub">近30日平价期权隐含波动率</span>
-        </div>
-        <div class="vol-chart-wrap">
-          <canvas ref="klineChart" class="vol-canvas"></canvas>
-        </div>
-        <div class="vol-chart-footer" v-if="klineData.length">
-          <span>数据点: {{ klineData.length }}</span>
-          <span>更新: {{ klineData[klineData.length-1]?.ts?.slice(0,16) || '--' }}</span>
+
+        <div class="chart-card">
+          <h2>ATM 期限结构</h2>
+          <p class="note">每个到期日取最接近标的现价的挂牌行权价，展示该合约 IV；ATM 缺失时留空。</p>
+          <svg viewBox="0 0 650 280" role="img" aria-label="ATM 期限结构">
+            <g v-for="tick in termChart.ticks" :key="'xt' + tick.label">
+              <text :x="tick.x" y="255" text-anchor="middle">{{ tick.label }}</text>
+            </g>
+            <g v-for="tick in termChart.yTicks" :key="'yt' + tick.value">
+              <line :x1="40" :x2="620" :y1="tick.y" :y2="tick.y" class="grid-line" />
+              <text x="36" :y="tick.y + 4" text-anchor="end">{{ formatIV(tick.value) }}</text>
+            </g>
+            <g v-for="series in termChart.series" :key="series.side">
+              <polyline v-for="seg in series.segments" :key="'seg' + seg" :points="seg"
+                :class="series.side === 'call' ? 'term-call' : 'term-put'" />
+              <g v-for="(p, i) in series.points" :key="i">
+                <circle :cx="p.x" :cy="p.y" r="3" :class="`pt-${p.ivStatus || 'unavailable'}`" />
+              </g>
+            </g>
+            <text x="620" y="272" text-anchor="end">到期日</text>
+            <text x="40" y="18">IV（%）</text>
+          </svg>
         </div>
       </div>
 
-      <!-- Smile -->
-      <div class="vol-chart-panel" v-show="activeTab === 'smile'">
-        <div class="vol-chart-header">
-          <h3>波动率微笑 — {{ selectedTargetName }} {{ selectedExpiry ? selectedExpiry.slice(4,6) + '/' + selectedExpiry.slice(6,8) : '' }}</h3>
-          <span class="vol-chart-sub">各行权价IV分布（现价标记）</span>
-        </div>
-        <div class="vol-chart-wrap">
-          <canvas ref="smileChart" class="vol-canvas"></canvas>
-        </div>
-      </div>
-
-      <!-- Surface -->
-      <div class="vol-chart-panel" v-show="activeTab === 'surface'">
-        <div class="vol-chart-header">
-          <h3>波动率曲面 — {{ selectedTargetName }} {{ selectedExpiry ? selectedExpiry.slice(4,6) + '/' + selectedExpiry.slice(6,8) : '' }}</h3>
-          <span class="vol-chart-sub">认购/认沽IV对比</span>
-        </div>
-        <div class="vol-chart-wrap">
-          <canvas ref="surfaceChart" class="vol-canvas"></canvas>
-        </div>
-      </div>
-
-      <!-- Term Structure -->
-      <div class="vol-chart-panel" v-show="activeTab === 'term'">
-        <div class="vol-chart-header">
-          <h3>IV期限结构 — {{ selectedTargetName }}</h3>
-          <span class="vol-chart-sub">各到期日平价IV</span>
-        </div>
-        <div class="vol-chart-wrap">
-          <canvas ref="termChart" class="vol-canvas"></canvas>
-        </div>
-        <div class="vol-term-table" v-if="termData.length">
+      <div class="table-card">
+        <h2>原始明细</h2>
+        <p class="note">按到期日与行权价排序；IV 缺失标记"不可用"；点击合约代码进入详情页。</p>
+        <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>到期日</th><th>ATM IV</th><th>标的价</th></tr>
+              <tr>
+                <th>到期日</th><th>行权价</th><th>类型</th><th>合约代码</th>
+                <th>IV（%）</th><th>状态</th><th>报价时间</th><th>获取时间</th>
+              </tr>
             </thead>
             <tbody>
-              <tr v-for="t in termData" :key="t.expiry">
-                <td>{{ t.expiry.slice(0,4) }}-{{ t.expiry.slice(4,6) }}-{{ t.expiry.slice(6,8) }}</td>
-                <td class="val-mono accent">{{ fmtPct(t.atm_iv) }}</td>
-                <td class="val-mono">{{ t.spot_price?.toFixed(3) || '--' }}</td>
+              <tr v-for="(row, i) in selectedRows" :key="i">
+                <td>{{ fmtExpiry(row.expiry) }}</td>
+                <td>{{ row.strike }}</td>
+                <td>{{ row.option_type }}</td>
+                <td><router-link :to="`/contract/${row.option_code}`">{{ row.option_code }}</router-link></td>
+                <td>{{ formatIV(row.ivValue) }}</td>
+                <td>{{ row.data_status }}</td>
+                <td>{{ formatTs(row.market_ts) }}</td>
+                <td>{{ formatTs(row.fetched_at) }}</td>
               </tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- 3D Surface -->
-      <div class="vol-chart-panel" v-show="activeTab === 'surface3d'">
-        <div class="vol-chart-header">
-          <h3>3D波动率曲面 — {{ selectedTargetName }}</h3>
-          <span class="vol-chart-sub">行权价 × 到期日 × IV · 热力着色</span>
+      <div class="table-card">
+        <h2>跨期 IV 对比</h2>
+        <p class="note">
+          每个到期日取最接近标的现价的 ATM 行权价，列出认购 / 认沽 ATM 的 IV 与价差。
+          价差 = 认购 IV − 认沽 IV，缺失/不可用时显示"不可用"，不做插值。仅对比，不做曲面。
+        </p>
+        <div class="table-wrap">
+          <table class="term-table">
+            <thead>
+              <tr>
+                <th>到期日</th>
+                <th>ATM 行权价</th>
+                <th>认购 ATM IV</th>
+                <th>认沽 ATM IV</th>
+                <th>价差（认−购）</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="t in termComparison" :key="t.expiry">
+                <td>{{ fmtExpiry(t.expiry) }}</td>
+                <td>{{ t.strike ?? '不可用' }}</td>
+                <td :class="{ dim: t.callStatus === 'unavailable' }">{{ t.callIv == null ? '不可用' : formatIV(t.callIv) }}<small v-if="t.callCodes.length">{{ t.callCodes.join(' / ') }}</small></td>
+                <td :class="{ dim: t.putStatus === 'unavailable' }">{{ t.putIv == null ? '不可用' : formatIV(t.putIv) }}<small v-if="t.putCodes.length">{{ t.putCodes.join(' / ') }}</small></td>
+                <td :class="{ dim: t.diff == null }">{{ t.diff == null ? '不可用' : (t.diff >= 0 ? '+' : '') + t.diff.toFixed(4) }}</td>
+                <td class="status-cell">
+                  <span :class="'tag-' + t.callStatus">认购{{ t.callStatus === 'unavailable' ? '不可用' : '' }}</span>
+                  <span :class="'tag-' + t.putStatus">认沽{{ t.putStatus === 'unavailable' ? '不可用' : '' }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <Surface3D :data="surface3dData" v-model:optionType="surface3dType" />
+        <p v-if="!termComparison.length" class="empty">暂无跨期对比数据。</p>
       </div>
-    </div>
-  </div>
+    </template>
 
-  <!-- Loading -->
-  <div class="vol-loading" v-else>
-    <div class="vol-loading-spinner"></div>
-    <p>加载波动率数据...</p>
-  </div>
+    <div class="unavailable">
+      <h2>暂未接入的能力</h2>
+      <ul>
+        <li><strong>历史 IV 曲线</strong>：需要数据库历史 IV 表，暂不可用。</li>
+        <li><strong>历史IV与K线叠加</strong>：需历史 IV 与日 K 对齐，暂不可用。</li>
+        <li><strong>3D 波动率曲面</strong>：需多到期日、多行权价三维数据，暂不可用。</li>
+      </ul>
+    </div>
+  </section>
 </template>
 
+<script setup>
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { buildVolatility, plotSeries, formatIV } from '../utils/volatility.mjs'
+import { readState, writeState } from '../utils/remember.mjs'
+
+const targets = [
+  { code: '510050', name: '50ETF(华夏上证50)' },
+  { code: '510300', name: '300ETF(华泰柏瑞沪深300)' },
+  { code: '510500', name: '500ETF(南方中证500)' },
+  { code: '588000', name: '科创50ETF(华夏)' },
+  { code: '588080', name: '科创板50ETF(易方达)' },
+]
+const remembered = readState('volatility', {})
+const target = ref(remembered.target || '510050')
+const expiry = ref(remembered.expiry || '')
+const data = ref(null)
+const model = ref(null)
+// 始终保持 { coverage: { total: 0 } } 形状，避免 null 引用；清空时 total 归零
+model.value = { coverage: { total: 0 } }
+const error = ref('')
+const loading = ref(false)
+const staleFlag = ref(false)
+let abortController = null
+// 记住用户选择的标的（到期日依赖快照有效性，不在恢复时强制保留）
+const firstTargetWrite = { value: true }
+watch(target, () => {
+  if (firstTargetWrite.value) { firstTargetWrite.value = false; return }
+  writeState('volatility', { target: target.value })
+})
+
+// 到期日切换时即时重算选中组，避免旧序列残留
+const selected = computed(() => {
+  if (!model.value?.groups?.length) return null
+  if (expiry.value) {
+    const found = model.value.groups.find(g => g.expiry === expiry.value)
+    if (!found) return null
+    return found
+  }
+  return model.value.groups[0]
+})
+const selectedRows = computed(() => selected.value?.rows || [])
+const smileChart = computed(() => selected.value ? plotSeries(selected.value.series, { minGap: 46 }) : { ticks: [], yTicks: [], series: [] })
+const termChart = computed(() => model.value ? plotSeries(model.value.termSeries, { minGap: 46 }) : { ticks: [], yTicks: [], series: [] })
+const expiries = computed(() => model.value?.expiries || [])
+// 跨期 IV 对比表：每个到期日一行，列出 ATM call / ATM put 的 IV 与差值。
+// 数据来自 buildVolatility 已算好的 groups[].atm，不引入新的数据来源。
+const termComparison = computed(() => {
+  if (!model.value?.groups?.length) return []
+  return model.value.groups.map(g => {
+    const call = g.atm?.call, put = g.atm?.put
+    const callIv = call?.status === 'available' ? call.ivValue : null
+    const putIv = put?.status === 'available' ? put.ivValue : null
+    const diff = callIv != null && putIv != null ? callIv - putIv : null
+    return {
+      expiry: g.expiry,
+      strike: g.atm?.strike,
+      callStatus: call?.status || 'unavailable',
+      putStatus: put?.status || 'unavailable',
+      callIv, putIv, diff,
+      callCodes: call?.codes || [],
+      putCodes: put?.codes || [],
+      spot: g.atm?.spot,
+      spotStatus: g.atm?.spotStatus,
+    }
+  })
+})
+
+// 到期日友好显示：20260923 → 2026-09-23
+function fmtExpiry(e) {
+  const m = String(e).match(/^(\d{4})(\d{2})(\d{2})$/)
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : e
+}
+
+function cleanup() {
+  if (abortController) { abortController.abort(); abortController = null }
+  loading.value = false
+}
+
+async function load() {
+  cleanup()
+  const ctrl = new AbortController()
+  abortController = ctrl
+  loading.value = true
+  error.value = ''
+  data.value = null
+  model.value = { coverage: { total: 0 } }
+  staleFlag.value = false
+  const sig = ctrl.signal
+  const code = target.value
+  try {
+    const qs = new URLSearchParams()
+    if (expiry.value) qs.set('expiry', expiry.value)
+    const res = await fetch(`/api/quotes/${code}?${qs.toString()}`, { signal: sig, headers: { Accept: 'application/json' } })
+    if (sig.aborted) return
+    if (!res.ok) {
+      let detail = ''
+      try { detail = (await res.json())?.detail || '' } catch {}
+      throw new Error(detail || `HTTP ${res.status}`)
+    }
+    const payload = await res.json()
+    if (sig.aborted) return
+    if (!payload || !Array.isArray(payload.rows)) throw new Error('响应格式无效')
+    const built = buildVolatility(payload)
+    data.value = payload
+    model.value = built
+    staleFlag.value = built.coverage.stale > 0
+    if (!built.expiries.includes(expiry.value)) expiry.value = ''
+    return
+  } catch (e) {
+    if (sig.aborted || e.name === 'AbortError') return
+    error.value = e.message || '加载失败'
+    data.value = null
+    model.value = { coverage: { total: 0 } }
+    staleFlag.value = false
+  } finally {
+    if (!sig.aborted) loading.value = false
+  }
+}
+
+function changeTarget() {
+  expiry.value = ''
+  staleFlag.value = false
+  error.value = ''
+  load()
+}
+
+onMounted(load)
+onUnmounted(cleanup)
+
+function formatTs(ts) {
+  return ts ? String(ts) : '—'
+}
+function statusLabel(status) {
+  if (status === 'stale') return '过期'
+  if (status === 'unavailable') return '不可用'
+  if (status === 'partial') return '部分可用'
+  if (status === 'ok') return '正常'
+  return '未知'
+}
+</script>
+
 <style scoped>
-/* ═══════════════════════════════════════════
-   Volatility Analysis Page
-   ═══════════════════════════════════════════ */
-.vol-page {
-  animation: fadeIn 0.35s ease;
-  padding-bottom: 40px;
-}
-
-/* ═══ TOP BAR ═══ */
-.vol-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.vol-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.vol-title-icon {
-  font-size: 24px;
-}
-.vol-title h1 {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin: 0;
-}
-.vol-controls {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.vol-target-tabs {
-  display: flex;
-  gap: 4px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 3px;
-}
-.vol-target-tab {
-  padding: 6px 14px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-}
-.vol-target-tab:hover {
-  color: var(--text-primary);
-  background: var(--bg-row-hover);
-}
-.vol-target-tab.active {
-  background: var(--accent);
-  color: var(--bg-deep);
-}
-.vol-expiry-select {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.vol-expiry-select label {
-  font-size: 12px;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-.vol-select {
-  padding: 6px 10px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  outline: none;
-  cursor: pointer;
-}
-.vol-select:focus {
-  border-color: var(--accent-dim);
-}
-
-/* ═══ STATS BAR ═══ */
-.vol-stats-bar {
-  display: flex;
-  gap: 24px;
-  padding: 16px 20px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
-}
-.vol-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.vol-stat-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-.vol-stat-val {
-  font-family: var(--font-mono);
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-.vol-stat-val.accent {
-  color: var(--accent);
-}
-
-/* ═══ TABS ═══ */
-.vol-tabs {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 20px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 0;
-}
-.vol-tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 20px;
-  border: none;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
-  margin-bottom: -1px;
-}
-.vol-tab:hover {
-  color: var(--text-secondary);
-  border-bottom-color: var(--border-light);
-}
-.vol-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-.vol-tab-icon {
-  font-size: 14px;
-}
-
-/* ═══ CHART AREA ═══ */
-.vol-chart-area {
-  min-height: 400px;
-}
-.vol-chart-panel {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 20px;
-  box-shadow: var(--shadow-card);
-}
-.vol-chart-header {
-  margin-bottom: 16px;
-}
-.vol-chart-header h3 {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin: 0 0 4px 0;
-}
-.vol-chart-sub {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.vol-chart-wrap {
-  position: relative;
-  margin-bottom: 12px;
-}
-.vol-canvas {
-  width: 100%;
-  height: 360px;
-  border-radius: 6px;
-  display: block;
-}
-.vol-chart-footer {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--text-muted);
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-/* ═══ TERM TABLE ═══ */
-.vol-term-table {
-  margin-top: 16px;
-  overflow-x: auto;
-}
-.vol-term-table table {
-  width: 100%;
-  border-collapse: collapse;
-}
-.vol-term-table th {
-  padding: 8px 12px;
-  text-align: left;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border-bottom: 1px solid var(--border);
-}
-.vol-term-table td {
-  padding: 8px 12px;
-  font-size: 13px;
-  color: var(--text-primary);
-  border-bottom: 1px solid var(--border);
-}
-.vol-term-table tr:hover td {
-  background: var(--bg-row-hover);
-}
-
-/* ═══ Loading ═══ */
-.vol-loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 100px 20px;
-  color: var(--text-muted);
-  gap: 16px;
-}
-.vol-loading-spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-
-/* ═══ Responsive ═══ */
-@media (max-width: 768px) {
-  .vol-topbar {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .vol-stats-bar {
-    gap: 16px;
-  }
-  .vol-tabs {
-    overflow-x: auto;
-  }
-  .vol-canvas {
-    height: 280px;
-  }
-  .vol-controls { width: 100%; flex-direction: column; align-items: flex-start; gap: 10px; }
-  .vol-target-tabs { width: 100%; overflow-x: auto; flex-wrap: nowrap; }
-  .vol-target-tab { flex: 1; min-width: 60px; padding: 6px 8px; font-size: 11px; }
-  .vol-expiry-select { width: 100%; }
-  .vol-select { flex: 1; }
-  .vol-stats-bar { gap: 12px; padding: 12px 14px; }
-  .vol-stat-val { font-size: 15px; }
-  .vol-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .vol-tab { padding: 8px 12px; font-size: 12px; white-space: nowrap; }
-  .vol-chart-panel { padding: 14px; }
-  .vol-chart-header h3 { font-size: 13px; }
+.volatility-page { display: grid; gap: 16px; }
+.model-badge { color: var(--warn); border: 1px solid var(--warn); border-radius: 20px; padding: 4px 10px; font-size: 12px; }
+.note { color: var(--text-dim); font-size: 12px; line-height: 1.7; }
+.controls { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-dim); min-width: 180px; }
+.field select { background: var(--bg-panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 14px; }
+.refresh-btn { background: var(--accent); color: var(--bg); border: none; border-radius: 6px; padding: 9px 16px; font-size: 14px; cursor: pointer; }
+.refresh-btn:disabled { opacity: .5; cursor: not-allowed; }
+.error { color: var(--err); border: 1px solid var(--err); border-radius: 8px; padding: 12px; }
+.empty { color: var(--text-dim); padding: 24px; text-align: center; }
+.meta-bar { display: flex; gap: 16px; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; background: var(--bg-panel); font-size: 12px; color: var(--text-dim); }
+.warn { color: var(--warn); }
+.ts-note { color: var(--text-muted); font-weight: 500; }
+.charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.chart-card, .table-card, .unavailable { border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 18px; background: var(--bg); box-shadow: var(--shadow); }
+.chart-card h2, .table-card h2, .unavailable h2 { font-size: 15px; margin-bottom: 8px; }
+svg { display: block; width: 100%; height: auto; }
+.grid-line { stroke: var(--border); stroke-width: 1; }
+.smile-call, .term-call { fill: none; stroke: var(--accent); stroke-width: 2; }
+.smile-put, .term-put { fill: none; stroke: var(--warn); stroke-width: 2; stroke-dasharray: 4 4; }
+.pt-fresh { fill: var(--text); }
+.pt-stale { fill: var(--warn); }
+.pt-unavailable { fill: var(--text-dim); opacity: .4; }
+.unavailable ul { margin: 8px 0 0 20px; font-size: 13px; color: var(--text-dim); }
+.table-wrap { overflow-x: auto; margin-top: 12px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th { font-size: 12px; color: var(--text-dim); }
+a { color: var(--accent); text-decoration: underline; }
+/* 跨期 IV 对比表 */
+.term-table td small { display: block; opacity: .6; font-size: 11px; margin-top: 4px; }
+.term-table td.dim { opacity: .5; }
+.term-table td.status-cell { text-align: left; display: flex; gap: 8px; flex-wrap: wrap; }
+.tag-ok, .tag-fresh { color: var(--ok, #2e7d32); }
+.tag-stale, .tag-unknown { color: var(--warn); }
+.tag-unavailable, .tag-ambiguous { color: var(--err); opacity: .85; }
+@media (max-width: 1000px) { .charts { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .volatility-page { min-width: 0; }
+  .volatility-page > * { min-width: 0; }
+  .controls { flex-direction: column; align-items: stretch; gap: 10px; }
+  .field { min-width: 0; }
+  .refresh-btn { width: 100%; }
+  .volatility-page h1 { font-size: 20px; }
+  .meta-bar { font-size: 11px; padding: 8px 10px; gap: 8px; }
+  .table-wrap th, .table-wrap td { padding: 8px 8px; font-size: 12px; }
+  .chart-card, .table-card { padding: 14px; }
 }
 </style>

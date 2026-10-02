@@ -1,764 +1,335 @@
+<template>
+  <div class="page">
+    <!-- 文案轮播 banner（可关闭，关闭状态持久化） -->
+    <PromoBanner v-if="bannerVisible" @close="closeBanner" />
+
+    <!-- 页头 -->
+    <div class="page-head">
+      <div class="ph-title">
+        <span class="ph-kicker">REALTIME T-QUOTE · 30S 自动刷新</span>
+        <h1>T 型报价</h1>
+        <p class="ph-desc">认购 / 认沽按行权价左右对齐，IV 与 Delta 逐合约展示；行情缺失自动降级 stale 标注，不展示模拟数据。</p>
+      </div>
+      <div class="ph-actions">
+        <button class="refresh-toggle" :class="{ on: autoRefresh }" type="button" @click="toggleAuto">
+          {{ autoRefresh ? '● 自动刷新中' : '自动刷新已停' }}
+        </button>
+        <span class="refresh-cd" v-if="autoRefresh">{{ refreshCountdown > 0 ? refreshCountdown + 's' : '…' }}</span>
+      </div>
+    </div>
+
+    <!-- 控制栏 -->
+    <div class="controls">
+      <div class="target-tabs">
+        <button
+          v-for="t in targets"
+          :key="t.target"
+          class="tab"
+          :class="{ active: selectedTarget === t.target, broken: !t.catalog_ok }"
+          @click="selectTarget(t.target)"
+        >
+          <span class="tab-code">{{ t.target }}</span>
+          <span class="tab-name">{{ shortName(t.name) }}</span>
+        </button>
+      </div>
+      <div class="expiry-tabs" v-if="expiries.length">
+        <button
+          class="tab small"
+          :class="{ active: selectedExpiry === exp }"
+          v-for="exp in expiries"
+          :key="exp"
+          @click="selectedExpiry = exp"
+        >{{ expiryLabel(exp) }}</button>
+      </div>
+    </div>
+
+    <!-- 状态条：数据状态必须可见 -->
+    <div class="statusbar" :class="statusClass">
+      <template v-if="data">
+        <span class="status-dot"></span>
+        <span class="status-text">{{ statusText }}</span>
+        <span class="status-spot" v-if="data.spot">
+          <span class="spot-label">标的现价</span>
+          <b class="spot-big">{{ data.spot.price.toFixed(3) }}</b>
+          <b class="chg" :class="data.spot.change_pct >= 0 ? 'up' : 'down'">
+            {{ data.spot.change_pct >= 0 ? '+' : '' }}{{ data.spot.change_pct }}%
+          </b>
+          <span class="spot-time">{{ fmtMarketTime(data.spot.market_time) }}</span>
+        </span>
+        <span class="status-spot unavailable" v-else>标的价格不可用</span>
+        <span class="status-time">抓取 {{ fmtIso(data.fetched_at) }}</span>
+        <span class="status-time" v-if="data.as_of">行情 {{ fmtIso(data.as_of) }}（{{ data.freshness === 'fresh' ? '当日' : '非当日' }}）</span>
+        <span class="status-time" v-else>行情时间未知（时效未知，口径未核验）</span>
+        <span class="refresh-hint" v-if="lastError">{{ lastError }}</span>
+      </template>
+      <template v-else>
+        <span class="status-dot"></span>
+        <span class="status-text">{{ loading ? '加载中…' : '暂无数据' }}</span>
+        <span class="status-time" v-if="lastError">{{ lastError }}</span>
+      </template>
+    </div>
+
+    <!-- T 型表 -->
+    <div class="tq-wrap" v-if="rows.length">
+      <table class="tq">
+        <thead>
+          <tr>
+            <th colspan="4" class="grp call">认购 CALL</th>
+            <th class="grp strike">行权价</th>
+            <th colspan="4" class="grp put">认沽 PUT</th>
+          </tr>
+          <tr class="sub">
+            <th>最新价</th><th>Delta</th><th>IV</th><th>名称</th>
+            <th></th>
+            <th>名称</th><th>IV</th><th>Delta</th><th>最新价</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="row in rows"
+            :key="row.key"
+            :class="{ atm: isAtm(row.strike) }"
+          >
+            <td class="num" :class="legClass(row.call)">{{ fmtPrice(row.call?.last_price) }}</td>
+            <td class="num">{{ fmtNum(row.call?.delta) }}</td>
+            <td class="num iv">{{ fmtIv(row.call?.iv) }}</td>
+            <td class="name"><router-link v-if="row.call?.option_code" :to="contractLink(row.call)">{{ row.call.name || row.call.option_code }}</router-link><span v-else>--</span></td>
+            <td class="strike">
+              <span class="strike-v">{{ fmtStrike(row.strike) }}</span>
+              <span class="atm-tag" v-if="isAtm(row.strike)">ATM</span>
+            </td>
+            <td class="name"><router-link v-if="row.put?.option_code" :to="contractLink(row.put)">{{ row.put.name || row.put.option_code }}</router-link><span v-else>--</span></td>
+            <td class="num iv">{{ fmtIv(row.put?.iv) }}</td>
+            <td class="num">{{ fmtNum(row.put?.delta) }}</td>
+            <td class="num" :class="legClass(row.put)">{{ fmtPrice(row.put?.last_price) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 空态 / 不可用 -->
+    <div class="empty" v-else-if="!loading">
+      <p class="empty-title">暂无可展示的合约行情</p>
+      <p class="empty-detail" v-if="data?.status_detail">{{ data.status_detail }}</p>
+      <p class="empty-detail">数据源失败时不展示模拟数据。</p>
+    </div>
+  </div>
+</template>
+
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { readState, writeState } from '../utils/remember.mjs'
+import PromoBanner from '../components/PromoBanner.vue'
 
-const router = useRouter()
-
-// ── State ──
+const tquoteRemembered = readState('tquote', {})
 const targets = ref([])
-const selectedTarget = ref('510050')
-const selectedExpiry = ref('all')
-const tquoteData = ref(null)
+const selectedTarget = ref(tquoteRemembered.target || '510050')
+const selectedExpiry = ref('')
+const expiries = ref([])
+const data = ref(null)
 const loading = ref(false)
-const spotPrice = ref(0)
-const refreshTimer = ref(null)
+const lastError = ref('')
+const spotPrice = ref(null)
 
-// ── Fetch targets for the selector ──
-const fetchTargets = async () => {
-  try {
-    const res = await fetch('/api/targets')
-    const data = await res.json()
-    targets.value = data.targets || []
-  } catch (e) {
-    console.error('fetchTargets:', e)
+// 文案轮播 banner：关闭状态持久化，避免每次刷新都再弹
+const bannerVisible = ref(!localStorage.getItem('hj_promo_closed'))
+function closeBanner() {
+  bannerVisible.value = false
+  localStorage.setItem('hj_promo_closed', '1')
+}
+
+const REFRESH_MS = 30000
+const REFRESH_BACKOFF_MAX = 120000   // 连续失败时的最大退避间隔
+const contractLink = leg => `/contract/${encodeURIComponent(leg.option_code)}`
+// 记住 T 型报价页选中的标的
+let firstTquoteWrite = true
+watch(selectedTarget, v => {
+  if (firstTquoteWrite) { firstTquoteWrite = false; return }
+  if (v) writeState('tquote', { target: v })
+})
+
+// 自动刷新：可暂停/恢复、标签页隐藏暂停、连续失败指数退避
+const autoRefresh = ref(true)
+const refreshCountdown = ref(Math.ceil(REFRESH_MS / 1000))
+const failStreak = ref(0)
+let refreshTick = null
+let backoffMs = REFRESH_MS
+
+function backoffFor(streak) {
+  return streak <= 0 ? REFRESH_MS : Math.min(REFRESH_MS * 2 ** Math.min(streak, 4), REFRESH_BACKOFF_MAX)
+}
+function startTick() {
+  if (refreshTick) return
+  backoffMs = backoffFor(failStreak.value)
+  refreshCountdown.value = Math.ceil(backoffMs / 1000)
+  refreshTick = setInterval(() => {
+    // 标签页隐藏时冻结倒计时、不发起请求
+    if (document.visibilityState !== 'visible') return
+    refreshCountdown.value -= 1
+    if (refreshCountdown.value <= 0) {
+      refreshCountdown.value = Math.ceil(backoffMs / 1000)
+      fetchTQuote()
+    }
+  }, 1000)
+}
+function stopTick() {
+  if (refreshTick) { clearInterval(refreshTick); refreshTick = null }
+}
+function toggleAuto() {
+  autoRefresh.value = !autoRefresh.value
+  if (autoRefresh.value) startTick()
+  else { stopTick(); refreshCountdown.value = 0 }
+}
+// 标签页可见/隐藏切换：隐藏暂停，可见恢复并立即刷一次
+function onVisibility() {
+  if (document.visibilityState === 'visible') {
+    if (autoRefresh.value) { startTick(); refreshCountdown.value = Math.ceil(backoffFor(failStreak.value) / 1000); fetchTQuote() }
+  } else {
+    stopTick()
   }
 }
 
-// ── Fetch T-quote data ──
-const fetchTQuote = async () => {
-  loading.value = true
+async function fetchTargets() {
   try {
-    const params = selectedExpiry.value !== 'all' ? `?expiry=${selectedExpiry.value}` : ''
-    const url = `/api/tquote/${selectedTarget.value}${params}`
-    const res = await fetch(url)
-    const data = await res.json()
-    tquoteData.value = data
-    spotPrice.value = data.spot_price || 0
+    const res = await fetch('/api/targets')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const d = await res.json()
+    targets.value = d.targets || []
+  } catch (e) {
+    lastError.value = `标的列表获取失败: ${e.message}`
+  }
+}
 
-    // Auto-select first expiry if none selected
-    if (data.expiries) {
-      const keys = Object.keys(data.expiries)
-      if (keys.length && selectedExpiry.value === 'all') {
-        // default: keep 'all' but populate expiry list
-      }
+async function fetchExpiries() {
+  expiries.value = []
+  try {
+    const res = await fetch(`/api/expiries/${selectedTarget.value}`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const d = await res.json()
+    expiries.value = d.expiries || []
+    if (expiries.value.length && !expiries.value.includes(selectedExpiry.value)) {
+      selectedExpiry.value = expiries.value[0]
     }
   } catch (e) {
-    console.error('fetchTQuote:', e)
+    lastError.value = `到期日列表获取失败: ${e.message}`
+  }
+}
+
+async function fetchTQuote() {
+  loading.value = true
+  try {
+    const p = selectedExpiry.value ? `?expiry=${selectedExpiry.value}` : ''
+    const res = await fetch(`/api/tquote/${selectedTarget.value}${p}`)
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}))
+      throw new Error(detail.detail || `HTTP ${res.status}`)
+    }
+    const d = await res.json()
+    data.value = d
+    spotPrice.value = d.spot?.price ?? null
+    lastError.value = d.data_status === 'stale' ? (d.status_detail || '展示的是过期缓存') : ''
+    // 成功：退避计数清零，恢复默认 30s 间隔
+    failStreak.value = 0
+    if (autoRefresh.value && refreshTick) {
+      backoffMs = backoffFor(0)
+      refreshCountdown.value = Math.ceil(backoffMs / 1000)
+    }
+  } catch (e) {
+    lastError.value = `T 型报价获取失败: ${e.message}`
+    if (!data.value) data.value = null
+    // 失败：累加退避计数，缩短请求频率避免打爆数据源
+    failStreak.value += 1
+    if (autoRefresh.value && refreshTick) {
+      backoffMs = backoffFor(failStreak.value)
+      refreshCountdown.value = Math.ceil(backoffMs / 1000)
+    }
   } finally {
     loading.value = false
   }
 }
 
-// ── Computed ──
-const expiryKeys = computed(() => {
-  if (!tquoteData.value?.expiries) return []
-  return Object.keys(tquoteData.value.expiries).sort()
-})
+function selectTarget(code) {
+  if (code === selectedTarget.value) return
+  selectedTarget.value = code
+  selectedExpiry.value = ''
+}
 
-// Flatten all rows across all selected expiries
-const tableRows = computed(() => {
-  if (!tquoteData.value?.expiries) return []
+const rows = computed(() => data.value?.rows || [])
 
-  if (selectedExpiry.value === 'all') {
-    // Merge all expiries: group by strike, show each expiry as a sub-row
-    const byStrike = {}
-    for (const [exp, expData] of Object.entries(tquoteData.value.expiries)) {
-      for (const row of expData.rows) {
-        const strike = row.strike
-        if (!byStrike[strike]) {
-          byStrike[strike] = { strike, expiries: {} }
-        }
-        byStrike[strike].expiries[exp] = row
-      }
-    }
-    return Object.values(byStrike).sort((a, b) => a.strike - b.strike)
-  } else {
-    const expData = tquoteData.value.expiries[selectedExpiry.value]
-    return expData ? expData.rows : []
+const isAtm = (strike) => {
+  if (spotPrice.value == null || !rows.value.length) return false
+  let best = null, min = Infinity
+  for (const r of rows.value) {
+    const d = Math.abs(r.strike - spotPrice.value)
+    if (d < min) { min = d; best = r.strike }
   }
+  return strike === best
+}
+
+const statusClass = computed(() => {
+  if (!data.value) return loading.value ? 'loading' : 'unavailable'
+  return ['ok', 'partial'].includes(data.value.data_status) ? 'ok'
+    : data.value.data_status === 'stale' ? 'stale' : 'unavailable'
 })
 
-const atmStrike = computed(() => {
-  if (!spotPrice.value || !tableRows.value.length) return null
-  let closest = null
-  let minDist = Infinity
-  for (const row of tableRows.value) {
-    const dist = Math.abs(row.strike - spotPrice.value)
-    if (dist < minDist) {
-      minDist = dist
-      closest = row.strike
-    }
-  }
-  return closest
+const statusText = computed(() => {
+  if (!data.value) return loading.value ? '加载中…' : '暂无数据'
+  const s = data.value.data_status
+  if (s === 'ok') return `报价可用 · ${data.value.status_detail || ''}`
+  if (s === 'partial') return `部分可用 · ${data.value.status_detail || ''}`
+  if (s === 'stale') return `过期数据 · ${data.value.status_detail || ''}`
+  return `不可用 · ${data.value.status_detail || ''}`
 })
 
-// ── Format helpers ──
-function fmtPrice(v) {
-  if (v == null) return '--'
-  return Number(v).toFixed(4)
-}
-function fmtDelta(v) {
-  if (v == null) return '--'
-  return Number(v).toFixed(4)
-}
-function fmtGamma(v) {
-  if (v == null) return '--'
-  return Number(v).toFixed(4)
-}
-function fmtStrike(v) {
-  return Number(v).toFixed(3)
-}
-function fmtSpot(v) {
-  return Number(v).toFixed(3)
+function fmtPrice(v) { return v == null ? '--' : Number(v).toFixed(4) }
+function fmtNum(v) { return v == null ? '--' : Number(v).toFixed(4) }
+function fmtIv(v) { return v == null ? '--' : (Number(v) * 100).toFixed(2) + '%' }
+function fmtStrike(v) { return Number(v).toFixed(4).replace(/0+$/, '').replace(/\.$/, '') }
+function fmtIso(s) { return s ? s.replace('T', ' ').slice(5, 19) : '--' }
+function fmtMarketTime(t) {
+  if (!t || t.length < 12) return t || '--'
+  return `${t.slice(4,6)}-${t.slice(6,8)} ${t.slice(8,10)}:${t.slice(10,12)}:${t.slice(12,14)}`
 }
 function expiryLabel(exp) {
-  // 20260722 → 7月
   if (!exp || exp.length < 6) return exp
-  const m = parseInt(exp.substring(4, 6))
-  return `${m}月`
+  return `${parseInt(exp.slice(4, 6))}月${exp.slice(6, 8) !== '00' ? exp.slice(6,8) + '日' : ''}`
 }
-function contractName(c) {
-  return c?.option_name || '--'
-}
-function changeClass(v) {
-  if (v == null) return ''
-  const n = Number(v)
-  return n > 0 ? 'val-up' : n < 0 ? 'val-down' : ''
+function shortName(n) { return (n || '').split('(')[0] }
+function legClass(leg) {
+  if (!leg || leg.data_status !== 'ok') return 'unavailable'
+  return ''
 }
 
-// ── Go to contract detail ──
-function goContract(c) {
-  if (!c?.option_code) return
-  router.push(`/contract/${c.option_code}`)
-}
-
-// ── Lifecycle ──
-watch(selectedTarget, () => { selectedExpiry.value = 'all'; fetchTQuote() })
-watch(selectedExpiry, () => { fetchTQuote() })
+watch(selectedTarget, () => { selectedExpiry.value = ''; fetchExpiries() })
+watch(selectedExpiry, (v) => { if (v) fetchTQuote() })
 
 onMounted(() => {
   fetchTargets()
-  fetchTQuote()
-  refreshTimer.value = setInterval(fetchTQuote, 30000)
+  fetchExpiries()
+  startTick()
+  document.addEventListener('visibilitychange', onVisibility)
 })
 
 onUnmounted(() => {
-  if (refreshTimer.value) clearInterval(refreshTimer.value)
+  stopTick()
+  document.removeEventListener('visibilitychange', onVisibility)
 })
 </script>
 
-<template>
-  <div class="page-tquote">
-    <!-- Header -->
-    <div class="tq-header">
-      <div class="tq-header-left">
-        <h2 class="page-title">T 型报价</h2>
-        <span class="page-subtitle" v-if="tquoteData">
-          {{ tquoteData.target_name }} · 现货 {{ fmtSpot(spotPrice) }}
-          <span class="badge-dot" :class="loading ? 'loading' : 'live'"></span>
-        </span>
-      </div>
-
-      <div class="tq-controls">
-        <!-- Target selector -->
-        <div class="target-tabs">
-          <button
-            v-for="t in targets"
-            :key="t.target"
-            class="target-tab"
-            :class="{ active: selectedTarget === t.target }"
-            @click="selectedTarget = t.target"
-          >
-            <span class="tab-code">{{ t.target }}</span>
-            <span class="tab-name">{{ t.target_name?.slice(0, 6) }}</span>
-          </button>
-        </div>
-
-        <!-- Expiry filter -->
-        <div class="expiry-tabs" v-if="expiryKeys.length">
-          <button
-            class="expiry-tab"
-            :class="{ active: selectedExpiry === 'all' }"
-            @click="selectedExpiry = 'all'"
-          >全部</button>
-          <button
-            v-for="exp in expiryKeys"
-            :key="exp"
-            class="expiry-tab"
-            :class="{ active: selectedExpiry === exp }"
-            @click="selectedExpiry = exp"
-          >{{ expiryLabel(exp) }}</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- T-Quote Table (桌面端) -->
-    <div class="tq-table-wrap tq-desktop-table" v-if="tableRows.length">
-      <!-- Column groups header -->
-      <table class="tq-table">
-        <thead>
-          <tr>
-            <th class="col-call" colspan="4">
-              <span class="group-label call-label">认购 CALL</span>
-            </th>
-            <th class="col-strike">
-              <span class="group-label strike-label">行权价</span>
-            </th>
-            <th class="col-put" colspan="4">
-              <span class="group-label put-label">认沽 PUT</span>
-            </th>
-          </tr>
-          <tr class="sub-header">
-            <!-- Call sub-headers -->
-            <th class="sub-th call-sub" @click="goContract(null)">最新价</th>
-            <th class="sub-th call-sub">Delta</th>
-            <th class="sub-th call-sub">Gamma</th>
-            <th class="sub-th call-sub">名称</th>
-            <!-- Strike -->
-            <th class="sub-th strike-sub">行权价</th>
-            <!-- Put sub-headers -->
-            <th class="sub-th put-sub">名称</th>
-            <th class="sub-th put-sub">Gamma</th>
-            <th class="sub-th put-sub">Delta</th>
-            <th class="sub-th put-sub">最新价</th>
-          </tr>
-        </thead>
-        <tbody>
-          <template v-for="row in tableRows" :key="row.strike">
-            <!-- When showing single expiry -->
-            <tr
-              v-if="selectedExpiry !== 'all'"
-              class="tq-row"
-              :class="{ atm: row.strike === atmStrike }"
-            >
-              <!-- Call side -->
-              <td class="col-val call-val" :class="changeClass(row.call?.change_pct)">
-                <span class="cell-link" @click.stop="goContract(row.call)">{{ fmtPrice(row.call?.last_price) }}</span>
-              </td>
-              <td class="col-val call-val val-mono">{{ fmtDelta(row.call?.delta) }}</td>
-              <td class="col-val call-val val-mono">{{ fmtGamma(row.call?.gamma) }}</td>
-              <td class="col-val call-val call-name">
-                <span class="cell-link" @click.stop="goContract(row.call)">{{ contractName(row.call) }}</span>
-              </td>
-
-              <!-- Strike -->
-              <td class="col-strike strike-cell" :class="{ 'atm-strike': row.strike === atmStrike }">
-                <span class="strike-value">{{ fmtStrike(row.strike) }}</span>
-                <span class="strike-tag" v-if="row.strike === atmStrike">ATM</span>
-              </td>
-
-              <!-- Put side -->
-              <td class="col-val put-val put-name">
-                <span class="cell-link" @click.stop="goContract(row.put)">{{ contractName(row.put) }}</span>
-              </td>
-              <td class="col-val put-val val-mono">{{ fmtGamma(row.put?.gamma) }}</td>
-              <td class="col-val put-val val-mono">{{ fmtDelta(row.put?.delta) }}</td>
-              <td class="col-val put-val" :class="changeClass(row.put?.change_pct)">
-                <span class="cell-link" @click.stop="goContract(row.put)">{{ fmtPrice(row.put?.last_price) }}</span>
-              </td>
-            </tr>
-
-            <!-- When showing all expiries: one row per strike, sub-rows per expiry -->
-            <template v-else>
-              <tr
-                v-for="(expRow, expIdx) in Object.entries(row.expiries)"
-                :key="`${row.strike}-${expIdx}`"
-                class="tq-row"
-                :class="{ atm: row.strike === atmStrike }"
-              >
-                <!-- Call -->
-                <td class="col-val call-val" :class="changeClass(expRow[1].call?.change_pct)">
-                  <span class="cell-link" v-if="expRow[1].call" @click.stop="goContract(expRow[1].call)">
-                    {{ fmtPrice(expRow[1].call?.last_price) }}
-                  </span>
-                  <span v-else>--</span>
-                </td>
-                <td class="col-val call-val val-mono">{{ fmtDelta(expRow[1].call?.delta) }}</td>
-                <td class="col-val call-val val-mono">{{ fmtGamma(expRow[1].call?.gamma) }}</td>
-                <td class="col-val call-val call-name">
-                  <span class="expiry-tag-mini">{{ expiryLabel(expRow[0]) }}</span>
-                  <span class="cell-link" v-if="expRow[1].call" @click.stop="goContract(expRow[1].call)">
-                    {{ contractName(expRow[1].call) }}
-                  </span>
-                </td>
-
-                <!-- Strike (only on first sub-row) -->
-                <td
-                  v-if="expIdx === 0"
-                  class="col-strike strike-cell"
-                  :class="{ 'atm-strike': row.strike === atmStrike }"
-                  :rowspan="Object.keys(row.expiries).length"
-                >
-                  <span class="strike-value">{{ fmtStrike(row.strike) }}</span>
-                  <span class="strike-tag" v-if="row.strike === atmStrike">ATM</span>
-                </td>
-
-                <!-- Put -->
-                <td class="col-val put-val put-name">
-                  <span class="cell-link" v-if="expRow[1].put" @click.stop="goContract(expRow[1].put)">
-                    {{ contractName(expRow[1].put) }}
-                  </span>
-                  <span v-else>--</span>
-                </td>
-                <td class="col-val put-val val-mono">{{ fmtGamma(expRow[1].put?.gamma) }}</td>
-                <td class="col-val put-val val-mono">{{ fmtDelta(expRow[1].put?.delta) }}</td>
-                <td class="col-val put-val" :class="changeClass(expRow[1].put?.change_pct)">
-                  <span class="cell-link" v-if="expRow[1].put" @click.stop="goContract(expRow[1].put)">
-                    {{ fmtPrice(expRow[1].put?.last_price) }}
-                  </span>
-                  <span v-else>--</span>
-                </td>
-              </tr>
-            </template>
-          </template>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- 移动端卡片视图 -->
-    <div class="tq-mobile-cards" v-if="tableRows.length">
-      <div
-        v-for="row in tableRows"
-        :key="row.strike"
-        class="tq-card"
-        :class="{ atm: row.strike === atmStrike }"
-      >
-        <!-- 行权价 header -->
-        <div class="tq-card-header">
-          <span class="tq-card-strike">{{ fmtStrike(row.strike) }}</span>
-          <span class="strike-tag" v-if="row.strike === atmStrike">ATM</span>
-          <span class="tq-card-expiry" v-if="selectedExpiry !== 'all'">{{ expiryLabel(selectedExpiry) }}</span>
-        </div>
-
-        <!-- 认购/认沽 两行 -->
-        <div class="tq-card-body">
-          <!-- 认购 -->
-          <div class="tq-card-side call-side" @click="goContract(row.call)">
-            <div class="tq-card-side-label">认购</div>
-            <div class="tq-card-fields">
-              <span class="tq-card-field">
-                <label>最新价</label>
-                <b :class="changeClass(row.call?.change_pct)">{{ fmtPrice(row.call?.last_price) }}</b>
-              </span>
-              <span class="tq-card-field">
-                <label>Delta</label>
-                <b>{{ fmtDelta(row.call?.delta) }}</b>
-              </span>
-              <span class="tq-card-field">
-                <label>Gamma</label>
-                <b>{{ fmtGamma(row.call?.gamma) }}</b>
-              </span>
-            </div>
-          </div>
-          <!-- 认沽 -->
-          <div class="tq-card-side put-side" @click="goContract(row.put)">
-            <div class="tq-card-side-label">认沽</div>
-            <div class="tq-card-fields">
-              <span class="tq-card-field">
-                <label>最新价</label>
-                <b :class="changeClass(row.put?.change_pct)">{{ fmtPrice(row.put?.last_price) }}</b>
-              </span>
-              <span class="tq-card-field">
-                <label>Delta</label>
-                <b>{{ fmtDelta(row.put?.delta) }}</b>
-              </span>
-              <span class="tq-card-field">
-                <label>Gamma</label>
-                <b>{{ fmtGamma(row.put?.gamma) }}</b>
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Empty state -->
-    <div class="tq-empty" v-else-if="!loading">
-      <p>暂无数据</p>
-    </div>
-
-    <!-- Loading -->
-    <div class="tq-loading" v-if="loading">
-      <span class="loading-dot"></span>
-      <span>加载中...</span>
-    </div>
-  </div>
-</template>
-
 <style scoped>
-.page-tquote {
-  animation: fadeIn 0.3s ease;
+/* 窄屏（600px 以下）：控件区纵排、tab 整行左右分布，触控面积更足 */
+@media (max-width: 600px) {
+  .controls { flex-direction: column; align-items: stretch; gap: 12px; }
+  .target-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .tab { flex-direction: row; justify-content: space-between; min-width: 0; width: 100%; padding: 10px 14px; }
+  .tab.active::before { top: 8px; bottom: 8px; }
+  .tab.small { flex: none; min-height: 36px; }
+  .expiry-tabs { gap: 6px; }
+  .statusbar { padding: 10px 12px; gap: 8px; font-size: 12px; }
+  .spot-big { font-size: 17px; }
 }
-
-/* ── Header ── */
-.tq-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
-  gap: 16px;
-}
-.page-title {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: 0.02em;
-}
-.page-subtitle {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-top: 4px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.badge-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  display: inline-block;
-}
-.badge-dot.live { background: var(--down); animation: pulse 2s ease-in-out infinite; }
-.badge-dot.loading { background: var(--accent); }
-
-/* ── Controls ── */
-.tq-controls {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 10px;
-}
-
-/* Target tabs */
-.target-tabs {
-  display: flex;
-  gap: 4px;
-}
-.target-tab {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.15s;
-  font-size: 12px;
-  gap: 2px;
-}
-.target-tab:hover {
-  border-color: var(--accent-dim);
-  color: var(--text-primary);
-}
-.target-tab.active {
-  background: var(--accent-soft);
-  border-color: var(--accent-dim);
-  color: var(--accent);
-}
-.tab-code {
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: 13px;
-}
-.tab-name {
-  font-size: 10px;
-  opacity: 0.7;
-}
-
-/* Expiry tabs */
-.expiry-tabs {
-  display: flex;
-  gap: 4px;
-}
-.expiry-tab {
-  padding: 4px 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  font-family: var(--font-mono);
-  transition: all 0.15s;
-}
-.expiry-tab:hover {
-  border-color: var(--border-light);
-  color: var(--text-primary);
-}
-.expiry-tab.active {
-  background: var(--accent-soft);
-  border-color: var(--accent-dim);
-  color: var(--accent);
-  font-weight: 600;
-}
-
-/* ── Table ── */
-.tq-table-wrap {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: auto;
-  box-shadow: var(--shadow-card);
-  max-height: calc(100vh - 220px);
-}
-.tq-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-  min-width: 800px;
-}
-
-/* Group header row */
-.tq-table thead tr:first-child th {
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border);
-  padding: 10px 0 6px;
-  text-align: center;
-}
-.group-label {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.call-label { color: var(--up); }
-.put-label { color: var(--down); }
-.strike-label { color: var(--accent); }
-
-/* Sub-header row */
-.sub-header th {
-  background: var(--bg-card);
-  padding: 8px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border-bottom: 1px solid var(--border-light);
-  white-space: nowrap;
-}
-.sub-th.call-sub { text-align: right; }
-.sub-th.strike-sub { text-align: center; }
-.sub-th.put-sub { text-align: left; }
-
-/* Column widths */
-.col-call { width: auto; }
-.col-strike { width: 90px; }
-.col-put { width: auto; }
-
-/* Data rows */
-.tq-row {
-  transition: background 0.1s;
-  border-bottom: 1px solid var(--border);
-}
-.tq-row:hover {
-  background: var(--bg-row-hover);
-}
-.tq-row.atm {
-  background: var(--accent, rgba(240,160,48,0.06));
-}
-.tq-row.atm:hover {
-  background: var(--accent, rgba(240,160,48,0.1));
-}
-
-/* Cells */
-.col-val {
-  padding: 8px 10px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  white-space: nowrap;
-}
-.call-val {
-  text-align: right;
-  color: var(--up);
-}
-.put-val {
-  text-align: left;
-  color: var(--down);
-}
-.call-name {
-  text-align: right;
-  font-size: 11px;
-  color: var(--text-secondary);
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.put-name {
-  text-align: left;
-  font-size: 11px;
-  color: var(--text-secondary);
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Strike cell */
-.strike-cell {
-  text-align: center;
-  background: var(--bg-primary);
-  border-left: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  padding: 8px 6px;
-  position: relative;
-}
-.strike-value {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--accent);
-}
-.strike-tag {
-  display: inline-block;
-  font-size: 9px;
-  font-weight: 700;
-  background: var(--accent);
-  color: var(--bg-deep);
-  padding: 1px 5px;
-  border-radius: 3px;
-  margin-left: 4px;
-  vertical-align: middle;
-}
-.atm-strike {
-  background: var(--accent, rgba(240,160,48,0.08)) !important;
-  border-left: 2px solid var(--accent) !important;
-  border-right: 2px solid var(--accent) !important;
-}
-
-/* Clickable cell links */
-.cell-link {
-  cursor: pointer;
-  transition: color 0.15s;
-}
-.cell-link:hover {
-  color: var(--accent);
-  text-decoration: underline;
-}
-
-/* Mini expiry tag in all-expiry mode */
-.expiry-tag-mini {
-  display: inline-block;
-  font-size: 9px;
-  font-weight: 600;
-  background: var(--bg-deep);
-  color: var(--text-muted);
-  padding: 1px 4px;
-  border-radius: 2px;
-  margin-right: 4px;
-  border: 1px solid var(--border);
-}
-
-/* ── Empty / Loading ── */
-.tq-empty {
-  padding: 60px 20px;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 14px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.tq-loading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 20px;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-.loading-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: pulse 1s ease-in-out infinite;
-}
-
-/* ── Responsive ── */
-/* ── 移动端卡片（默认隐藏） ── */
-.tq-mobile-cards { display: none; }
-.tq-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 8px;
-  overflow: hidden;
-}
-.tq-card.atm { border-color: var(--accent-dim); }
-.tq-card-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border);
-}
-.tq-card-strike {
-  font-family: var(--font-mono);
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--accent);
-}
-.tq-card-expiry {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-left: auto;
-}
-.tq-card-body { display: flex; }
-.tq-card-side {
-  flex: 1;
-  padding: 10px 14px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.tq-card-side:hover { background: var(--bg-row-hover); }
-.call-side { border-right: 1px solid var(--border); }
-.tq-card-side-label {
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-bottom: 8px;
-}
-.call-side .tq-card-side-label { color: var(--up); }
-.put-side .tq-card-side-label { color: var(--down); }
-.tq-card-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.tq-card-field {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 12px;
-}
-.tq-card-field label {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-.tq-card-field b {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-primary);
-}
-
-/* ── Responsive ── */
-@media (max-width: 768px) {
-  .tq-desktop-table { display: none; }
-  .tq-mobile-cards { display: block; }
-  .tq-header { flex-direction: column; align-items: flex-start; gap: 12px; }
-  .tq-controls { align-items: flex-start; width: 100%; }
-  .target-tabs { flex-wrap: wrap; width: 100%; }
-  .target-tab { flex: 1; min-width: 60px; padding: 6px 8px; }
-  .tab-name { display: none; }
-  .expiry-tabs { flex-wrap: wrap; }
-  .page-title { font-size: 16px; }
-}
-@media (min-width: 769px) {
-  .tq-mobile-cards { display: none !important; }
+.tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 </style>

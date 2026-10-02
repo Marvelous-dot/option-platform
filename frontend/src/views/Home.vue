@@ -1,1123 +1,742 @@
-<script setup>
-import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
-import { getCssVars } from '@/utils/cssVar'
-
-const router = useRouter()
-
-const targets = ref([])
-const clock = ref('')
-const clockTimer = null
-
-// ── K-line chart state ──
-const klineTarget = ref('510050')
-const klineData = ref([])
-const klineLoading = ref(false)
-const klineCanvas = ref(null)
-
-const fetchKline = async (targetCode) => {
-  if (klineLoading.value) return
-  klineLoading.value = true
-  try {
-    const res = await fetch(`/api/kline/${targetCode}?days=90`)
-    const data = await res.json()
-    klineData.value = data.data || []
-    nextTick(() => renderKlineChart())
-  } catch (e) {
-    console.error('fetchKline:', e)
-  } finally {
-    klineLoading.value = false
-  }
-}
-
-function renderKlineChart() {
-  const canvas = klineCanvas.value
-  if (!canvas || !klineData.value.length) return
-  const ctx = canvas.getContext('2d')
-  const vars = getCssVars()
-  const dpr = window.devicePixelRatio || 1
-  const rect = canvas.getBoundingClientRect()
-  canvas.width = rect.width * dpr
-  canvas.height = rect.height * dpr
-  ctx.scale(dpr, dpr)
-  const W = rect.width, H = rect.height
-  const data = klineData.value
-
-  // Compute price range from high/low
-  const highs = data.map(d => d.high)
-  const lows = data.map(d => d.low)
-  const minP = Math.min(...lows) * 0.998
-  const maxP = Math.max(...highs) * 1.002
-  const range = maxP - minP || 0.01
-
-  const pad = { top: 28, right: 50, bottom: 24, left: 56 }
-  const cw = W - pad.left - pad.right
-  const ch = H - pad.top - pad.bottom
-
-  const xOf = (i) => pad.left + (i + 0.5) / Math.max(data.length, 1) * cw
-  const yOf = (v) => pad.top + ch - (v - minP) / range * ch
-
-  const candleW = Math.max(2, Math.min(20, cw / data.length * 0.6))
-
-  // Clear
-  ctx.fillStyle = vars.bgCard
-  ctx.fillRect(0, 0, W, H)
-
-  // Grid
-  ctx.strokeStyle = vars.border
-  ctx.lineWidth = 1
-  for (let i = 0; i <= 4; i++) {
-    const y = pad.top + ch * i / 4
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke()
-  }
-
-  // Y labels
-  ctx.fillStyle = vars.textDim
-  ctx.font = '10px ' + vars.fontMono
-  ctx.textAlign = 'right'
-  for (let i = 0; i <= 4; i++) {
-    const v = maxP - range * i / 4
-    const y = pad.top + ch * i / 4
-    ctx.fillText(v.toFixed(3), pad.left - 8, y + 3)
-  }
-
-  // Draw candlesticks
-  for (let i = 0; i < data.length; i++) {
-    const d = data[i]
-    const x = xOf(i)
-    const isUp = d.close >= d.open
-    const color = isUp ? vars.up : vars.down
-
-    // Wick (high-low line)
-    ctx.strokeStyle = color
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    ctx.moveTo(x, yOf(d.high))
-    ctx.lineTo(x, yOf(d.low))
-    ctx.stroke()
-
-    // Body (open-close rectangle)
-    const yOpen = yOf(d.open)
-    const yClose = yOf(d.close)
-    const bodyTop = Math.min(yOpen, yClose)
-    const bodyH = Math.max(1, Math.abs(yOpen - yClose))
-
-    ctx.fillStyle = color
-    ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH)
-
-    // Border for hollow effect on up candles
-    if (isUp) {
-      ctx.strokeStyle = color
-      ctx.lineWidth = 1
-      ctx.strokeRect(x - candleW / 2, bodyTop, candleW, bodyH)
-    }
-  }
-
-  // X labels (dates)
-  ctx.textAlign = 'center'
-  ctx.fillStyle = vars.textDim
-  ctx.font = '10px ' + vars.fontMono
-  const step = Math.max(1, Math.floor(data.length / 6))
-  for (let i = 0; i < data.length; i += step) {
-    const x = xOf(i)
-    const date = data[i].date ? data[i].date.slice(5, 10) : ''
-    ctx.fillText(date, x, H - pad.bottom + 14)
-  }
-
-  // Last price label
-  const last = data[data.length - 1]
-  const lx = xOf(data.length - 1)
-  const ly = yOf(last.close)
-  ctx.fillStyle = last.close >= last.open ? vars.up : vars.down
-  ctx.font = 'bold 11px ' + vars.fontMono
-  ctx.textAlign = 'right'
-  ctx.fillText(last.close.toFixed(3), W - pad.right + 2, ly + 4)
-
-  // Title
-  ctx.fillStyle = vars.textMuted
-  ctx.font = '11px ' + vars.fontSans
-  ctx.textAlign = 'left'
-  ctx.fillText('K线图 (30日)', pad.left, 16)
-}
-
-const fetchTargets = async () => {
-  try {
-    const res = await fetch('/api/targets')
-    targets.value = (await res.json()).targets || []
-  } catch (e) { console.error('fetchTargets:', e) }
-}
-
-onMounted(() => {
-  fetchTargets()
-  clockTimer = setInterval(() => {
-    clock.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-  }, 1000)
-})
-
-// Fetch K-line when targets are loaded
-watch(targets, (newTargets) => {
-  if (newTargets.length && !klineData.value.length) {
-    fetchKline(klineTarget.value)
-  }
-}, { immediate: false })
-
-const refreshInterval = setInterval(() => {
-  fetchTargets()
-}, 30000)
-
-onUnmounted(() => {
-  clearInterval(refreshInterval)
-  if (clockTimer) clearInterval(clockTimer)
-})
-
-// ── Computed ──
-const totalCall = computed(() => targets.value.reduce((s, t) => s + (t.call_count || 0), 0))
-const totalPut  = computed(() => targets.value.reduce((s, t) => s + (t.put_count || 0), 0))
-const totalCallPct = computed(() => {
-  const total = totalCall.value + totalPut.value
-  return total ? Math.round(totalCall.value / total * 100) : 50
-})
-
-// All contracts flattened, sorted by "interesting": ATM first, then by time_value
-const topContracts = computed(() => {
-  const all = []
-  for (const t of targets.value) {
-    const spot = t.latest_price || 0
-    for (const c of (t.contracts || [])) {
-      const dist = spot > 0 ? Math.abs(c.strike_price - spot) / spot : 1
-      all.push({
-        ...c,
-        target_code: t.target,
-        target_name: t.target_name,
-        spot,
-        isCall: c.option_type === '认购',
-        // nearness score: lower = more interesting
-        _score: dist,
-      })
-    }
-  }
-  // Sort by closeness to ATM, take 20
-  all.sort((a, b) => a._score - b._score)
-  return all.slice(0, 20)
-})
-
-// ── Helpers ──
-function statusText() {
-  if (!targets.value.length) return '连接中...'
-  return '实时同步中'
-}
-function statusColor() {
-  if (!targets.value.length) return 'var(--text-muted)'
-  return 'var(--down)'
-}
-function fmtPrice(v) {
-  if (v == null) return '--'
-  return Number(v).toFixed(3)
-}
-function fmtChange(v) {
-  if (v == null) return { text: '--', cls: 'val-neu' }
-  const n = Number(v)
-  const sign = n > 0 ? '+' : ''
-  const cls = n > 0 ? 'val-up' : n < 0 ? 'val-down' : 'val-neu'
-  return { text: sign + n.toFixed(3), cls }
-}
-function fmtVol(v) {
-  if (v == null) return '--'
-  if (v >= 10000) return (v / 10000).toFixed(1) + '万'
-  return v.toLocaleString()
-}
-function getPrice(t) {
-  if (t.latest_price != null) return Number(t.latest_price).toFixed(3)
-  return '--'
-}
-function getVol(t) {
-  if (t.volatility != null) return (Number(t.volatility) * 100).toFixed(1) + '%'
-  return '--'
-}
-function callPct(t) {
-  const total = (t.call_count || 0) + (t.put_count || 0)
-  if (!total) return 50
-  return Math.round((t.call_count || 0) / total * 100)
-}
-function contractLabel(c) {
-  if (c.option_type === '认购') return 'Call'
-  return 'Put'
-}
-function contractColor(c) {
-  return c.option_type === '认购' ? 'var(--up)' : 'var(--down)'
-}
-function strikeClass(c) {
-  if (c.spot <= 0) return ''
-  const dist = Math.abs(c.strike_price - c.spot)
-  if (dist < 0.001) return 'strike-atm'
-  if (dist / c.spot < 0.03) return 'strike-near'
-  return ''
-}
-</script>
-
 <template>
-  <div class="dashboard">
+  <div class="home">
+    <!-- 顶部滚动进度条 -->
+    <div class="h-progress" aria-hidden="true"><i :style="{ transform: `scaleX(${progress})` }"></i></div>
 
-    <!-- ═══ HERO TOP BAR ═══ -->
-    <div class="hero-bar">
-      <div class="hero-left">
-        <div class="hero-clock">{{ clock || '--:--:--' }}</div>
-        <div class="hero-date">{{ new Date().toLocaleDateString('zh-CN', { year:'numeric', month:'long', day:'numeric', weekday:'short' }) }}</div>
+    <!-- 悬浮导航 -->
+    <header class="h-nav" :class="{ solid: scrolled }">
+      <a class="h-brand" href="#top" @click.prevent="toTop">
+        <span class="h-logo">V</span>
+        <span class="h-name">海疆期权</span>
+        <span class="h-badge">v2</span>
+      </a>
+      <nav class="h-links" aria-label="页面导览">
+        <a v-for="s in navSections" :key="s.id" :href="'#' + s.id" @click.prevent="goTo(s.id)">{{ s.label }}</a>
+      </nav>
+      <router-link class="h-cta" to="/tquote">进入平台</router-link>
+    </header>
+
+    <!-- ============ HERO ============ -->
+    <section id="top" class="hero">
+      <div class="hero-bg" ref="heroBgEl" aria-hidden="true">
+        <i class="orb orb-a"></i><i class="orb orb-b"></i><i class="orb orb-c"></i>
+        <i class="grid-lines"></i>
       </div>
-      <div class="hero-center">
-        <div class="hero-stat">
-          <div class="hero-stat-label">覆盖标的</div>
-          <div class="hero-stat-value accent">{{ targets.length || '--' }}</div>
+      <div class="hero-inner">
+        <p class="hero-kicker rv" style="--d:.0s">SHANGHAI ETF OPTIONS · 市场数据工作台</p>
+        <h1 class="hero-title">
+          <span class="line rv" style="--d:.08s">把期权市场，</span>
+          <span class="line rv" style="--d:.18s">一眼看<em>清楚</em>。</span>
+        </h1>
+        <p class="hero-sub rv" style="--d:.3s">
+          海疆期权 v2 —— 面向个人投资者的期权数据工作台：实时 T 型报价、隐含波动率与
+          Greeks、全量合约筛选导出、标的 K 线与策略到期推演，全部基于真实挂牌行情。
+        </p>
+        <div class="hero-actions rv" style="--d:.42s">
+          <router-link to="/tquote" class="btn-accent">进入平台 →</router-link>
+          <a class="btn-ghost" href="#tquote" @click.prevent="goTo('tquote')">先看看能做什么</a>
         </div>
-        <div class="hero-divider"></div>
-        <div class="hero-stat">
-          <div class="hero-stat-label">合约总数</div>
-          <div class="hero-stat-value">{{ totalCall + totalPut || '--' }}</div>
-        </div>
-        <div class="hero-divider"></div>
-        <div class="hero-stat">
-          <div class="hero-stat-label">认购 / 认沽</div>
-          <div class="hero-stat-value hero-ratio">
-            <span class="ratio-call">{{ totalCall }}</span>
-            <span class="ratio-sep">:</span>
-            <span class="ratio-put">{{ totalPut }}</span>
+        <div class="tickers rv" style="--d:.56s" v-if="tickers.length" aria-label="标的实时行情">
+          <div class="tk" v-for="t in tickers" :key="t.code">
+            <div class="tk-l"><b>{{ t.code }}</b><span>{{ t.name }}</span></div>
+            <div class="tk-r">
+              <b class="num" :class="chgClass(t.chg)">{{ t.price }}</b>
+              <span class="num" :class="chgClass(t.chg)">{{ fmtChg(t.chg) }}</span>
+            </div>
           </div>
         </div>
-        <div class="hero-divider"></div>
-        <div class="hero-stat">
-          <div class="hero-stat-label">多空比</div>
-          <div class="hero-stat-value">
-            <span class="ratio-call">{{ totalCallPct }}</span><span class="ratio-pct">%</span>
-          </div>
-        </div>
       </div>
-      <div class="hero-right">
-        <div class="status-indicator" :style="{ '--dot-color': statusColor() }">
-          <span class="status-dot"></span>
-          <span class="status-label">{{ statusText() }}</span>
-        </div>
-        <div class="hero-refresh">标的数 {{ targets.length }}</div>
-      </div>
-    </div>
-
-    <!-- ═══ K-LINE CHART ═══ -->
-    <section class="section-kline">
-      <div class="section-header">
-        <h2 class="section-title">标的价格走势</h2>
-        <div class="kline-targets">
-          <button
-            v-for="t in targets"
-            :key="t.target"
-            :class="['kline-target-btn', { active: klineTarget === t.target }]"
-            @click="klineTarget = t.target; fetchKline(t.target)"
-          >
-            {{ t.target }}
-          </button>
-        </div>
-      </div>
-      <div class="kline-chart-wrap">
-        <canvas ref="klineCanvas" class="kline-canvas"></canvas>
-        <div class="kline-empty" v-if="!klineData.length && !klineLoading">
-          <div class="empty-icon">◈</div>
-          <p>加载中...</p>
-        </div>
-      </div>
+      <div class="scroll-hint" aria-hidden="true"><i></i><span>向下滚动</span></div>
     </section>
 
-    <!-- ═══ TARGET CARDS ROW ═══ -->
-    <section class="section-targets">
-      <div class="section-header">
-        <h2 class="section-title">标的概览</h2>
-        <span class="section-hint">点击跳转 T 型报价</span>
-      </div>
-      <div class="targets-cards">
-        <div
-          class="target-card"
-          v-for="t in targets"
-          :key="t.target"
-          @click="router.push('/tquote')"
-        >
-          <!-- Card header -->
-          <div class="tc-header">
-            <div class="tc-symbol">
-              <span class="tc-code">{{ t.target }}</span>
-              <span class="tc-badge">ETF</span>
-            </div>
-            <div class="tc-contracts">
-              <span class="tc-num">{{ t.contract_count }}</span>
-              <span class="tc-unit">合约</span>
-            </div>
-          </div>
-
-          <!-- Name -->
-          <div class="tc-name">{{ t.target_name }}</div>
-
-          <!-- Price big -->
-          <div class="tc-price-block">
-            <span class="tc-price">{{ getPrice(t) }}</span>
-            <span class="tc-vol-badge">
-              <span class="tc-vol-lbl">IV</span>
-              <span class="tc-vol-val">{{ getVol(t) }}</span>
-            </span>
-          </div>
-
-          <!-- Call/Put ratio bar -->
-          <div class="tc-ratio-bar">
-            <div class="tc-bar-call" :style="{ width: callPct(t) + '%' }">
-              <span v-if="callPct(t) > 20" class="tc-bar-text">C {{ t.call_count }}</span>
-            </div>
-            <div class="tc-bar-put" :style="{ width: (100 - callPct(t)) + '%' }">
-              <span v-if="(100 - callPct(t)) > 20" class="tc-bar-text">P {{ t.put_count }}</span>
-            </div>
-          </div>
-          <div class="tc-ratio-labels">
-            <span class="tc-lbl-call">认购 {{ t.call_count }}</span>
-            <span class="tc-lbl-put">认沽 {{ t.put_count }}</span>
-          </div>
-
-          <!-- Quick stats row -->
-          <div class="tc-footer">
-            <div class="tc-stat">
-              <span class="tc-st-lbl">认购</span>
-              <span class="tc-st-val" style="color:var(--up)">{{ t.call_count }}</span>
-            </div>
-            <div class="tc-sep"></div>
-            <div class="tc-stat">
-              <span class="tc-st-lbl">认沽</span>
-              <span class="tc-st-val" style="color:var(--down)">{{ t.put_count }}</span>
-            </div>
-            <div class="tc-sep"></div>
-            <div class="tc-stat">
-              <span class="tc-st-lbl">波动率</span>
-              <span class="tc-st-val">{{ getVol(t) }}</span>
+    <!-- ============ 01 T 型报价 ============ -->
+    <section id="tquote" class="feat">
+      <div class="feat-inner">
+        <div class="feat-copy rv">
+          <span class="feat-no">01</span>
+          <h2>像交易终端一样<em>看盘</em></h2>
+          <p>T 型报价把认购与认沽按行权价左右对齐，买卖挂价、隐含波动率、希腊字母逐合约铺开——一屏之内，市场结构尽收眼底。</p>
+          <ul class="feat-points">
+            <li>认购 / 认沽 T 型对排，虚实值分区清晰</li>
+            <li>IV · Delta / Gamma / Theta / Vega 逐合约展示</li>
+            <li>30 秒自动刷新，行情缺失自动降级 stale 标注</li>
+          </ul>
+        </div>
+        <div class="feat-visual rv" style="--d:.12s">
+          <div class="panel">
+            <div class="panel-head"><span class="chip chip-accent">510050 · 50ETF购10月</span><span class="chip">2026-10 到期</span></div>
+            <div class="tq-mock">
+              <div class="tq-row tq-head">
+                <span>购·最新</span><span>购·IV</span><span class="tq-k">行权价</span><span>沽·IV</span><span>沽·最新</span>
+              </div>
+              <div class="tq-row" v-for="(r, i) in trows" :key="r.k" :class="{ atm: r.atm }" :style="{ '--d': (i * 80) + 'ms' }">
+                <span class="num c-up">{{ r.cP }}</span>
+                <span class="num c-dim">{{ r.cIv }}</span>
+                <span class="tq-k num">{{ r.k }}</span>
+                <span class="num c-dim">{{ r.pIv }}</span>
+                <span class="num c-down">{{ r.pP }}</span>
+              </div>
             </div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- ═══ ACTIVE CONTRACTS TABLE ═══ -->
-    <section class="section-contracts">
-      <div class="section-header">
-        <h2 class="section-title">ATM 附近合约</h2>
-        <span class="section-hint">距现货最近的 20 条合约 · 点击查看详情</span>
-      </div>
-      <div class="contracts-table-wrap" v-if="topContracts.length">
-        <table class="contracts-table">
-          <thead>
-            <tr>
-              <th class="th-code">合约</th>
-              <th class="th-type">方向</th>
-              <th class="th-num">行权价</th>
-              <th class="th-num">最新价</th>
-              <th class="th-num">Delta</th>
-              <th class="th-num">Gamma</th>
-              <th class="th-num">Theta</th>
-              <th class="th-num">IV</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="c in topContracts"
-              :key="c.option_code"
-              class="c-row"
-              @click="router.push(`/contract/${c.option_code}`)"
-            >
-              <!-- Code + name + target -->
-              <td class="td-cell td-code">
-                <div class="c-code-badge">
-                  <span class="c-direction" :style="{ background: contractColor(c) }">{{ contractLabel(c) }}</span>
-                  <div class="c-code-name">
-                    <span class="c-code">{{ c.option_code }}</span>
-                    <span class="c-target">{{ c.target_code }}</span>
-                  </div>
-                </div>
-              </td>
-              <!-- Type label -->
-              <td class="td-cell td-type">
-                <span class="c-type-tag" :style="{ color: contractColor(c), borderColor: contractColor(c) + '33' }">
-                  {{ c.option_type }}
-                </span>
-              </td>
-              <!-- Strike -->
-              <td class="td-cell td-num">
-                <span class="strike-val" :class="strikeClass(c)">{{ c.strike_price?.toFixed(3) }}</span>
-              </td>
-              <!-- Price -->
-              <td class="td-cell td-num">
-                <span class="c-price">{{ c.last_price?.toFixed(4) }}</span>
-              </td>
-              <!-- Greeks -->
-              <td class="td-cell td-num td-greek">
-                <span class="greek-val" :class="c.delta > 0 ? 'val-up' : 'val-down'">
-                  {{ c.delta?.toFixed(4) }}
-                </span>
-              </td>
-              <td class="td-cell td-num td-greek">
-                <span class="greek-val">{{ c.gamma?.toFixed(4) }}</span>
-              </td>
-              <td class="td-cell td-num td-greek">
-                <span class="greek-val" :class="c.theta < 0 ? 'val-down' : ''">
-                  {{ c.theta?.toFixed(4) }}
-                </span>
-              </td>
-              <td class="td-cell td-num td-greek">
-                <span class="greek-val">{{ (c.implied_volatility * 100)?.toFixed(1) }}%</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="contracts-empty" v-else>
-        <div class="empty-icon">◈</div>
-        <p>数据加载中...</p>
+    <!-- ============ 02 全量行情 ============ -->
+    <section id="quotes" class="feat flip">
+      <div class="feat-inner">
+        <div class="feat-copy rv">
+          <span class="feat-no">02</span>
+          <h2>数百行合约，<em>一键</em>筛到底</h2>
+          <p>五只标的全部挂牌合约汇成一张表。按到期月份、虚实值、关键词组合筛选，点列排序，找到目标合约直接跳详情。</p>
+          <ul class="feat-points">
+            <li>到期日 / 虚实值 / 关键词组合筛选</li>
+            <li>任意列排序，点击直达合约详情页</li>
+            <li>一键导出 CSV，离线分析随你</li>
+          </ul>
+        </div>
+        <div class="feat-visual rv" style="--d:.12s">
+          <div class="panel">
+            <div class="panel-head">
+              <span class="chip chip-accent">全部标的</span>
+              <span class="chip">到期日 ▾</span><span class="chip">虚实值 ▾</span>
+              <span class="chip chip-btn">导出 CSV</span>
+            </div>
+            <div class="q-mock">
+              <div class="q-row q-head"><span>代码</span><span>名称</span><span>最新</span><span>IV</span></div>
+              <div class="q-row" v-for="(r, i) in qrows" :key="r.code" :style="{ '--d': (i * 70) + 'ms' }">
+                <span class="num c-code">{{ r.code }}</span>
+                <span>{{ r.name }}</span>
+                <span class="num" :class="r.dir > 0 ? 'c-up' : 'c-down'">{{ r.last }}</span>
+                <span class="num c-dim">{{ r.iv }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
+    <!-- ============ 03 标的 K 线 ============ -->
+    <section id="kline" class="feat">
+      <div class="feat-inner">
+        <div class="feat-copy rv">
+          <span class="feat-no">03</span>
+          <h2>行情断了，<em>历史</em>还在</h2>
+          <p>标的日 K 全部落盘缓存。上游数据源偶尔抽风没关系——最近的历史依然可看，并以 stale 明确标注，不让你误当成实时。</p>
+          <ul class="feat-points">
+            <li>五只 ETF 标的日 K · 均线 / 成交量联动</li>
+            <li>日 K 落盘缓存，重启后预热秒开</li>
+            <li>十字光标查看单日开高低收</li>
+          </ul>
+        </div>
+        <div class="feat-visual rv" style="--d:.12s">
+          <div class="panel">
+            <div class="panel-head"><span class="chip chip-accent">510050 · 日 K</span><span class="chip">MA5 / MA20</span></div>
+            <div class="kwrap">
+              <svg viewBox="0 0 440 240" preserveAspectRatio="xMidYMid meet" role="img" aria-label="K线示意">
+                <line v-for="gy in [60, 110, 160]" :key="gy" x1="20" :y1="gy" x2="424" :y2="gy" class="kgrid"></line>
+                <line x1="20" y1="212" x2="424" y2="212" class="kaxis"></line>
+                <g v-for="(c, i) in candles" :key="i" class="candle" :style="{ '--d': (i * 42) + 'ms' }">
+                  <line :x1="c.cx" :y1="c.yh" :x2="c.cx" :y2="c.yl" :class="c.up ? 'wick-u' : 'wick-d'"></line>
+                  <rect :x="c.cx - 9" :y="c.yt" width="18" :height="c.bh" :class="c.up ? 'cu' : 'cd'" rx="1.5"></rect>
+                </g>
+                <path :d="maPath" pathLength="1" data-draw class="maline"></path>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 04 策略实验室 ============ -->
+    <section id="lab" class="feat flip">
+      <div class="feat-inner">
+        <div class="feat-copy rv">
+          <span class="feat-no">04</span>
+          <h2>先推演，<em>再下单</em></h2>
+          <p>用真实挂牌合约搭组合：牛市价差、跨式、勒式……到期盈亏曲线随选腿实时重算，盈亏平衡点一眼定位。再配上波动率曲面，把 IV 立着看。</p>
+          <ul class="feat-points">
+            <li>真实挂牌合约组合，到期盈亏实时推演</li>
+            <li>波动率曲面 / 微笑 / 期限结构多视角</li>
+            <li>独立模型假设 · 模拟盘，非投资建议</li>
+          </ul>
+        </div>
+        <div class="feat-visual rv" style="--d:.12s">
+          <div class="lab-grid">
+            <div class="panel">
+              <div class="panel-head"><span class="chip chip-accent">牛市价差 · 到期盈亏</span></div>
+              <svg viewBox="0 0 440 220" preserveAspectRatio="xMidYMid meet" role="img" aria-label="到期盈亏示意">
+                <line x1="30" y1="120" x2="410" y2="120" class="zeroline"></line>
+                <polygon points="40,150 170,150 260,60 400,60 400,120 40,120" class="payoff-area"></polygon>
+                <path d="M 40,150 L 170,150 L 260,60 L 400,60" pathLength="1" data-draw class="payoff-line"></path>
+                <circle cx="200" cy="120" r="4" class="dot dot-accent"></circle>
+                <circle cx="170" cy="150" r="4" class="dot"></circle>
+                <circle cx="260" cy="60" r="4" class="dot"></circle>
+                <text x="200" y="106" class="svg-txt svg-accent">盈亏平衡</text>
+                <text x="148" y="172" class="svg-txt">低行权价</text>
+                <text x="278" y="52" class="svg-txt">高行权价</text>
+              </svg>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><span class="chip chip-accent">波动率微笑 · IV</span></div>
+              <svg viewBox="0 0 440 200" preserveAspectRatio="xMidYMid meet" role="img" aria-label="波动率微笑示意">
+                <line x1="30" y1="170" x2="410" y2="170" class="zeroline"></line>
+                <path d="M 40,55 C 130,175 310,175 400,55" pathLength="1" data-draw class="smile-line"></path>
+                <circle cx="40" cy="55" r="4" class="dot"></circle>
+                <circle cx="223" cy="145" r="4" class="dot dot-accent"></circle>
+                <circle cx="400" cy="55" r="4" class="dot"></circle>
+                <text x="238" y="150" class="svg-txt svg-accent">ATM · IV 低点</text>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 数据源 ============ -->
+    <section id="sources" class="srcs">
+      <div class="srcs-inner rv">
+        <p class="srcs-label">数据来源</p>
+        <div class="srcs-chips">
+          <span class="src-chip"><b>上交所</b>合约目录</span>
+          <span class="src-chip"><b>新浪财经</b>报价 / IV / Greeks</span>
+          <span class="src-chip"><b>腾讯财经</b>标的价格</span>
+          <span class="src-chip src-dim"><b>本地缓存</b>日 K 落盘 · stale 降级</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CTA ============ -->
+    <section id="enter" class="outro">
+      <div class="outro-inner">
+        <h2 class="rv">准备好了吗？<em>行情</em>正在跳动。</h2>
+        <p class="rv" style="--d:.1s">打开平台，五只标的、数百份合约、实时 IV 与策略推演，都在等你。</p>
+        <div class="rv" style="--d:.2s">
+          <router-link to="/tquote" class="btn-accent btn-big">进入平台 →</router-link>
+        </div>
+      </div>
+      <footer class="h-footer">
+        <span>© 2026 海疆期权 · v2 市场数据</span>
+        <span>所有数据仅作参考，不构成投资建议</span>
+      </footer>
+    </section>
   </div>
 </template>
 
+<script setup>
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+
+const navSections = [
+  { id: 'tquote', label: 'T 型报价' },
+  { id: 'quotes', label: '全量行情' },
+  { id: 'kline', label: '标的 K 线' },
+  { id: 'lab', label: '策略实验室' },
+]
+
+const progress = ref(0)
+const scrolled = ref(false)
+const heroBgEl = ref(null)
+const tickers = ref([])
+
+const reduced = typeof window !== 'undefined'
+  && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+
+/* ---------- 实时行情条（hero） ---------- */
+async function loadTickers() {
+  const codes = ['510050', '510300', '510500', '588000', '588080']
+  try {
+    const res = await Promise.all(codes.map(async c => {
+      const r = await fetch(`/api/tquote/${c}`)
+      return r.ok ? r.json() : null
+    }))
+    tickers.value = res
+      .filter(Boolean)
+      .map(d => ({
+        code: d.target_code,
+        name: (d.target_name || '').replace(/\(.*\)/, ''),
+        price: d.spot?.price,
+        chg: d.spot?.change_pct,
+      }))
+      .filter(t => t.price != null)
+    // 行情条是异步 v-if 渲染的，挂载时的观察器扫不到它 → 渲染后补挂
+    await nextTick()
+    setupReveal()
+  } catch { tickers.value = [] }
+}
+
+function chgClass(c) { return c > 0 ? 'up' : c < 0 ? 'down' : '' }
+function fmtChg(c) { return (c > 0 ? '+' : '') + Number(c).toFixed(2) + '%' }
+
+/* ---------- 滚动驱动 ---------- */
+let ticking = false
+function onScroll() {
+  if (ticking) return
+  ticking = true
+  requestAnimationFrame(() => {
+    ticking = false
+    const y = window.scrollY
+    const dh = document.documentElement.scrollHeight - window.innerHeight
+    progress.value = dh > 0 ? Math.min(1, y / dh) : 0
+    scrolled.value = y > 24
+    if (!reduced) {
+      if (heroBgEl.value && y < window.innerHeight * 1.2) {
+        heroBgEl.value.style.transform = `translateY(${y * 0.28}px)`
+      }
+      drawPaths()
+    }
+  })
+}
+
+function drawPaths() {
+  const vh = window.innerHeight
+  for (const p of drawItems) {
+    const r = p.host.getBoundingClientRect()
+    if (r.bottom < -80 || r.top > vh + 80) continue
+    const t = clamp((vh * 0.92 - r.top) / (r.height + vh * 0.4), 0, 1)
+    p.el.style.strokeDashoffset = String(1 - t)
+  }
+}
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)) }
+
+/* ---------- 揭示动画 ---------- */
+let io = null
+function setupReveal() {
+  const els = document.querySelectorAll('.rv')
+  if (reduced || !('IntersectionObserver' in window)) {
+    els.forEach(el => el.classList.add('in'))
+    return
+  }
+  if (!io) {
+    io = new IntersectionObserver(entries => {
+      entries.forEach(e => {
+        if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target) }
+      })
+    }, { threshold: 0.15, rootMargin: '0px 0px -6% 0px' })
+  }
+  els.forEach(el => { if (!el.classList.contains('in')) io.observe(el) })
+}
+
+/* ---------- 导航 ---------- */
+function goTo(id) {
+  document.getElementById(id)?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+}
+function toTop() { window.scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' }) }
+
+/* ---------- K 线 mock 数据（svg 坐标） ---------- */
+const kRaw = [0.30, 0.36, 0.33, 0.42, 0.40, 0.48, 0.45, 0.55, 0.52, 0.61, 0.58, 0.68, 0.65, 0.75]
+const Y = v => 212 - v * 190
+const candles = kRaw.map((c, i) => {
+  const o = i === 0 ? c - 0.04 : kRaw[i - 1]
+  const up = c >= o
+  const h = Math.max(o, c) + 0.035
+  const l = Math.min(o, c) - 0.035
+  const cx = 26 + i * 29
+  const yt = Y(Math.max(o, c))
+  return { cx, up, yh: Y(h), yl: Y(l), yt, bh: Math.max(2, Math.abs(Y(o) - Y(c))) }
+})
+
+function smoothPath(pts) {
+  if (!pts.length) return ''
+  let d = `M ${pts[0][0]},${pts[0][1]}`
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1]
+    const [x1, y1] = pts[i]
+    const mx = (x0 + x1) / 2
+    d += ` C ${mx},${y0} ${mx},${y1} ${x1},${y1}`
+  }
+  return d
+}
+const maPath = smoothPath(kRaw.map((v, i) => [26 + i * 29, Y(v)]))
+
+/* ---------- T 型报价 mock ---------- */
+const trows = [
+  { k: '2.850', cP: '0.0965', cIv: '26.8', pIv: '27.4', pP: '0.0081' },
+  { k: '2.900', cP: '0.0648', cIv: '25.6', pIv: '26.2', pP: '0.0172' },
+  { k: '2.950', cP: '0.0402', cIv: '24.9', pIv: '25.5', pP: '0.0334', atm: true },
+  { k: '3.000', cP: '0.0231', cIv: '24.7', pIv: '25.9', pP: '0.0671' },
+  { k: '3.050', cP: '0.0120', cIv: '25.2', pIv: '26.6', pP: '0.1068' },
+]
+
+/* ---------- 全量行情 mock ---------- */
+const qrows = [
+  { code: '10007345', name: '50ETF购10月2900', last: '0.0648', iv: '25.6', dir: 1 },
+  { code: '10007351', name: '50ETF沽10月2900', last: '0.0172', iv: '26.2', dir: -1 },
+  { code: '10007402', name: '300ETF购10月4000', last: '0.0891', iv: '21.4', dir: 1 },
+  { code: '10007418', name: '500ETF购10月6500', last: '0.0453', iv: '23.8', dir: 1 },
+  { code: '10007455', name: '科创50购10月1050', last: '0.0327', iv: '31.5', dir: -1 },
+]
+
+/* ---------- 生命周期 ---------- */
+let drawItems = []
+onMounted(() => {
+  setupReveal()
+  drawItems = Array.from(document.querySelectorAll('[data-draw]')).map(el => ({
+    el,
+    host: el.closest('section') || el.ownerSVGElement?.parentElement,
+  }))
+  if (reduced) {
+    drawItems.forEach(p => { p.el.style.strokeDashoffset = '0' })
+  } else {
+    drawPaths()
+  }
+  window.addEventListener('scroll', onScroll, { passive: true })
+  window.addEventListener('resize', onScroll, { passive: true })
+  onScroll()
+  loadTickers()
+})
+onUnmounted(() => {
+  window.removeEventListener('scroll', onScroll)
+  window.removeEventListener('resize', onScroll)
+  io?.disconnect()
+})
+</script>
+
 <style scoped>
-/* ═══════════════════════════════════════════
-   Dashboard Layout
-   ═══════════════════════════════════════════ */
-.dashboard {
-  animation: fadeIn 0.4s ease;
+/* ================= 进度条 ================= */
+.h-progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 300;
+  background: transparent; pointer-events: none;
+}
+.h-progress i {
+  display: block; height: 100%; background: var(--accent);
+  transform: scaleX(0); transform-origin: left;
 }
 
-/* ═══ HERO BAR ═══ */
-.hero-bar {
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-primary) 100%);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 20px 28px;
-  margin-bottom: 24px;
-  position: relative;
-  overflow: hidden;
+/* ================= 导航 ================= */
+.h-nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 200;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 28px; height: 60px;
+  transition: background .25s, box-shadow .25s, border-color .25s;
+  border-bottom: 1px solid transparent;
+}
+.h-nav.solid {
+  background: rgba(255,255,255,.88);
+  backdrop-filter: blur(10px);
+  border-bottom-color: var(--border);
+}
+.h-brand { display: flex; align-items: center; gap: 8px; cursor: pointer; text-decoration: none; }
+.h-logo {
+  width: 28px; height: 28px; border-radius: 8px;
+  background: var(--accent); color: var(--accent-text);
+  font-weight: 800; font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+}
+.h-name { font-weight: 800; font-size: 15px; color: var(--text); letter-spacing: -0.02em; }
+.h-badge {
+  font-size: 10px; font-weight: 700; color: var(--accent-ink);
+  border: 1px solid var(--accent); border-radius: var(--pill); padding: 1px 7px;
+}
+.h-links { display: flex; gap: 22px; }
+.h-links a {
+  font-size: 13px; color: var(--text-dim); text-decoration: none; font-weight: 600;
+  transition: color .15s; position: relative;
+}
+.h-links a:hover { color: var(--text); }
+.h-links a::after {
+  content: ''; position: absolute; left: 0; right: 100%; bottom: -4px; height: 2px;
+  background: var(--accent); transition: right .25s;
+}
+.h-links a:hover::after { right: 0; }
+.h-cta {
+  background: var(--accent); color: var(--accent-text);
+  font-weight: 700; font-size: 13px; text-decoration: none;
+  padding: 8px 18px; border-radius: var(--pill); transition: background .15s, transform .15s;
+}
+.h-cta:hover { background: var(--accent-hover); }
+
+/* ================= HERO ================= */
+.hero {
+  position: relative; min-height: 100vh; min-height: 100svh;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; padding: 120px 28px 80px;
+}
+.hero-bg { position: absolute; inset: -12% 0 0 0; pointer-events: none; will-change: transform; }
+.orb { position: absolute; border-radius: 50%; filter: blur(60px); }
+.orb-a { width: 420px; height: 420px; left: 6%; top: 8%; background: rgba(205,246,78,.16); }
+.orb-b { width: 360px; height: 360px; right: 4%; top: 30%; background: rgba(37,99,235,.07); }
+.orb-c { width: 300px; height: 300px; left: 38%; bottom: -4%; background: rgba(205,246,78,.10); }
+.grid-lines {
+  position: absolute; inset: 0; opacity: .5;
+  background-image:
+    linear-gradient(var(--border-subtle) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 75% 65% at 50% 42%, #000 35%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse 75% 65% at 50% 42%, #000 35%, transparent 78%);
+}
+.hero-inner { position: relative; max-width: 1120px; width: 100%; text-align: center; }
+.hero-kicker {
+  font-size: 12px; font-weight: 700; letter-spacing: .22em;
+  color: var(--accent-ink); margin-bottom: 22px;
+}
+.hero-title {
+  font-size: clamp(38px, 6.6vw, 78px); line-height: 1.08;
+  font-weight: 800; letter-spacing: -0.035em; color: var(--text);
+}
+.hero-title .line { display: block; }
+.hero-title em {
+  font-style: normal; position: relative; white-space: nowrap;
+  background: linear-gradient(transparent 62%, var(--accent) 62%);
+  padding: 0 .06em;
+}
+.hero-sub {
+  max-width: 640px; margin: 26px auto 0;
+  font-size: clamp(14px, 1.5vw, 16.5px); line-height: 1.75; color: var(--text-dim);
+}
+.hero-actions { display: flex; gap: 14px; justify-content: center; margin-top: 34px; flex-wrap: wrap; }
+.btn-accent {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--accent); color: var(--accent-text); text-decoration: none;
+  font-weight: 800; font-size: 14.5px; padding: 13px 30px; border-radius: var(--pill);
+  box-shadow: 0 6px 22px var(--accent-glow);
+  transition: transform .18s, box-shadow .18s, background .15s;
+}
+.btn-accent:hover { background: var(--accent-hover); transform: translateY(-2px); box-shadow: 0 10px 28px var(--accent-glow); }
+.btn-ghost {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--border); color: var(--text); text-decoration: none;
+  font-weight: 700; font-size: 14.5px; padding: 13px 26px; border-radius: var(--pill);
+  background: rgba(255,255,255,.7); transition: border-color .15s, transform .18s;
+}
+.btn-ghost:hover { border-color: var(--text); transform: translateY(-2px); }
+.btn-big { font-size: 16px; padding: 16px 40px; }
+
+/* 实时行情条 */
+.tickers {
+  display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+  margin-top: 46px;
+}
+.tk {
+  display: flex; align-items: center; gap: 12px;
+  background: rgba(255,255,255,.82); border: 1px solid var(--border);
+  border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow);
+  min-width: 168px; text-align: left;
+}
+.tk-l { display: flex; flex-direction: column; gap: 1px; }
+.tk-l b { font-size: 12.5px; font-family: var(--font-mono); color: var(--text); }
+.tk-l span { font-size: 10.5px; color: var(--text-muted); }
+.tk-r { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; margin-left: auto; }
+.tk-r b { font-size: 14px; font-family: var(--font-mono); }
+.tk-r span { font-size: 11px; font-family: var(--font-mono); }
+.num.up { color: var(--up); }
+.num.down { color: var(--down); }
+
+.scroll-hint {
+  position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  color: var(--text-muted); font-size: 11px; letter-spacing: .18em;
+}
+.scroll-hint i {
+  width: 1px; height: 34px; background: var(--border); position: relative; overflow: hidden;
+}
+.scroll-hint i::after {
+  content: ''; position: absolute; left: 0; top: -40%; width: 100%; height: 40%;
+  background: var(--accent-ink); animation: hint 1.8s ease-in-out infinite;
+}
+@keyframes hint { to { top: 110%; } }
+
+/* ================= 揭示动画 ================= */
+.rv {
+  opacity: 0; transform: translateY(26px);
+  transition: opacity .7s ease var(--d, 0s), transform .7s cubic-bezier(.22,.61,.36,1) var(--d, 0s);
+}
+.rv.in { opacity: 1; transform: none; }
+
+/* ================= 功能 section ================= */
+.feat { position: relative; }
+.feat-inner {
+  max-width: 1120px; margin: 0 auto; padding: 110px 28px;
+  display: grid; grid-template-columns: 5fr 6fr; gap: 64px; align-items: center;
+}
+.feat.flip .feat-inner { grid-template-columns: 6fr 5fr; }
+.feat.flip .feat-copy { order: 2; }
+.feat.flip .feat-visual { order: 1; }
+.feat-copy { position: relative; padding-left: 26px; }
+.feat-copy::before {
+  content: ''; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 2px; background: linear-gradient(var(--accent), transparent);
+  transform: scaleY(0); transform-origin: top; transition: transform .8s cubic-bezier(.22,.61,.36,1) .15s;
+}
+.feat-copy.in::before { transform: scaleY(1); }
+.feat-no {
+  display: block; font-size: 76px; font-weight: 800; line-height: 1;
+  color: transparent; -webkit-text-stroke: 1.5px var(--border);
+  margin-bottom: 6px; letter-spacing: -0.04em; user-select: none;
+}
+.feat-copy h2 {
+  font-size: clamp(24px, 3vw, 34px); font-weight: 800; letter-spacing: -0.03em;
+  color: var(--text); line-height: 1.25; margin-bottom: 14px;
+}
+.feat-copy h2 em {
+  font-style: normal; background: linear-gradient(transparent 64%, var(--accent) 64%);
+  padding: 0 .05em;
+}
+.feat-copy p { font-size: 14.5px; line-height: 1.8; color: var(--text-dim); margin-bottom: 20px; }
+.feat-points { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.feat-points li {
+  position: relative; padding-left: 22px;
+  font-size: 13.5px; color: var(--text-dim); line-height: 1.6;
+}
+.feat-points li::before {
+  content: ''; position: absolute; left: 0; top: .5em;
+  width: 12px; height: 6px; border-radius: 4px;
+  border-left: 2.5px solid var(--accent-ink); border-bottom: 2.5px solid var(--accent-ink);
+  transform: rotate(-45deg) translateY(-1px);
 }
 
-.hero-bar::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  opacity: 0.6;
+/* 面板 */
+.panel {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow); padding: 18px;
+}
+.panel-head { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.chip {
+  font-size: 11px; font-weight: 700; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: var(--pill); padding: 4px 11px;
+  background: var(--bg-elevated); white-space: nowrap;
+}
+.chip-accent { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.chip-btn { background: var(--text); color: #fff; border-color: var(--text); }
+
+/* T 型 mock */
+.tq-mock { display: flex; flex-direction: column; gap: 4px; }
+.tq-row {
+  display: grid; grid-template-columns: 1fr 1fr 1.1fr 1fr 1fr; gap: 4px; align-items: center;
+  padding: 9px 10px; border-radius: 8px; font-size: 12.5px;
+  opacity: 0; transform: translateX(18px);
+  transition: opacity .5s ease var(--d, 0s), transform .5s ease var(--d, 0s);
+}
+.rv.in .tq-row { opacity: 1; transform: none; }
+.tq-row.tq-head { font-size: 10.5px; color: var(--text-muted); font-weight: 700; }
+.tq-row:not(.tq-head):hover { background: var(--bg-hover); }
+.tq-row.atm { background: var(--accent-glow); outline: 1px solid var(--accent); }
+.tq-k { text-align: center; font-weight: 800; color: var(--text); }
+.tq-head .tq-k { color: var(--text-muted); font-weight: 700; }
+.c-up { color: var(--up); }
+.c-down { color: var(--down); }
+.c-dim { color: var(--text-dim); }
+.c-code { color: var(--text); font-weight: 600; }
+.tq-row .num, .q-row .num { font-family: var(--font-mono); font-size: 12px; }
+
+/* 行情 mock */
+.q-mock { display: flex; flex-direction: column; }
+.q-row {
+  display: grid; grid-template-columns: 90px 1fr 76px 56px; gap: 10px; align-items: center;
+  padding: 9px 10px; font-size: 12.5px; border-bottom: 1px solid var(--border-subtle);
+  opacity: 0; transform: translateY(12px);
+  transition: opacity .5s ease var(--d, 0s), transform .5s ease var(--d, 0s);
+}
+.rv.in .q-row { opacity: 1; transform: none; }
+.q-row:last-child { border-bottom: none; }
+.q-row:not(.q-head):hover { background: var(--bg-hover); }
+.q-head { font-size: 10.5px; color: var(--text-muted); font-weight: 700; border-bottom: 1px solid var(--border); }
+
+/* K线 svg */
+.kwrap svg { width: 100%; height: auto; display: block; }
+.kgrid { stroke: var(--border-subtle); stroke-dasharray: 3 5; }
+.kaxis { stroke: var(--border); }
+.candle { transform: scaleY(0); transform-origin: 0 212px; }
+.rv.in .candle { transform: scaleY(1); transition: transform .55s cubic-bezier(.22,.61,.36,1) var(--d, 0s); }
+.cu { fill: var(--up); }
+.cd { fill: var(--down); }
+.wick-u { stroke: var(--up); stroke-width: 1.4; }
+.wick-d { stroke: var(--down); stroke-width: 1.4; }
+.maline {
+  fill: none; stroke: var(--ma20); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 1; stroke-dashoffset: 1;
 }
 
-.hero-bar::after {
-  content: '';
-  position: absolute;
-  top: -50%; right: -20%;
-  width: 400px; height: 400px;
-  background: radial-gradient(circle, var(--accent-glow) 0%, transparent 60%);
-  border-radius: 50%;
-  pointer-events: none;
+/* 策略/波动率 */
+.lab-grid { display: flex; flex-direction: column; gap: 16px; }
+.lab-grid svg { width: 100%; height: auto; display: block; }
+.zeroline { stroke: var(--border); stroke-dasharray: 4 5; }
+.payoff-line, .smile-line {
+  fill: none; stroke: var(--accent-ink); stroke-width: 3;
+  stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 1; stroke-dashoffset: 1;
+}
+.payoff-area { fill: var(--accent-glow); opacity: 0; transition: opacity .8s ease .5s; }
+.rv.in .payoff-area { opacity: 1; }
+.dot { fill: #fff; stroke: var(--text-dim); stroke-width: 2; }
+.dot-accent { fill: var(--accent); stroke: var(--accent-ink); }
+.svg-txt { font-size: 11px; fill: var(--text-muted); font-weight: 600; }
+.svg-accent { fill: var(--accent-ink); }
+
+/* ================= 数据源 ================= */
+.srcs { padding: 60px 28px 30px; }
+.srcs-inner { max-width: 1120px; margin: 0 auto; text-align: center; }
+.srcs-label {
+  font-size: 11px; font-weight: 700; letter-spacing: .22em; color: var(--text-muted);
+  margin-bottom: 18px;
+}
+.srcs-chips { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.src-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  border: 1px solid var(--border); border-radius: var(--pill);
+  padding: 9px 18px; font-size: 12.5px; color: var(--text-dim); background: var(--bg-elevated);
+}
+.src-chip b { color: var(--text); font-weight: 800; }
+.src-dim { border-style: dashed; }
+
+/* ================= CTA / footer ================= */
+.outro {
+  padding: 130px 28px 0; text-align: center; position: relative; overflow: hidden;
+}
+.outro::before {
+  content: ''; position: absolute; left: 50%; bottom: -180px; transform: translateX(-50%);
+  width: 640px; height: 320px; border-radius: 50%;
+  background: rgba(205,246,78,.14); filter: blur(70px); pointer-events: none;
+}
+.outro-inner { position: relative; max-width: 720px; margin: 0 auto; }
+.outro h2 {
+  font-size: clamp(30px, 4.6vw, 52px); font-weight: 800; letter-spacing: -0.03em;
+  color: var(--text); line-height: 1.2; margin-bottom: 16px;
+}
+.outro h2 em {
+  font-style: normal; background: linear-gradient(transparent 62%, var(--accent) 62%);
+  padding: 0 .06em;
+}
+.outro p { color: var(--text-dim); font-size: 15px; line-height: 1.75; margin-bottom: 30px; }
+.h-footer {
+  position: relative; max-width: 1120px; margin: 90px auto 0;
+  padding: 18px 0 26px; border-top: 1px solid var(--border);
+  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  font-size: 12px; color: var(--text-muted);
 }
 
-.hero-left {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 4px;
-  flex-shrink: 0;
-  min-width: 140px;
-}
-.hero-clock {
-  font-family: var(--font-mono);
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: 0.04em;
-  line-height: 1;
-}
-.hero-date {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.hero-center {
-  display: flex;
-  align-items: center;
-  gap: 28px;
-  flex: 1;
-  justify-content: center;
-}
-.hero-stat {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-.hero-stat-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-.hero-stat-value {
-  font-family: var(--font-mono);
-  font-size: 26px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.02em;
-  line-height: 1;
-}
-.hero-stat-value.accent {
-  color: var(--accent);
-}
-.hero-divider {
-  width: 1px;
-  height: 36px;
-  background: var(--border);
-  flex-shrink: 0;
-}
-
-.hero-ratio {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-}
-.ratio-call { color: var(--up); }
-.ratio-put  { color: var(--down); }
-.ratio-sep  { color: var(--text-muted); font-size: 18px; }
-.ratio-pct  { font-size: 14px; color: var(--text-muted); margin-left: 2px; }
-
-.hero-right {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 6px;
-  flex-shrink: 0;
-  min-width: 140px;
-}
-.status-indicator {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--dot-color);
-  display: inline-block;
-  animation: pulse 2s ease-in-out infinite;
-}
-.status-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--dot-color);
-}
-.hero-refresh {
-  font-size: 11px;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-
-/* ═══ SECTIONS ═══ */
-section {
-  margin-bottom: 24px;
-}
-.section-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 14px;
-}
-.section-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: 0.02em;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.section-title::before {
-  content: '';
-  width: 3px;
-  height: 16px;
-  background: var(--accent);
-  border-radius: 2px;
-  display: inline-block;
-}
-.section-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-/* ═══ TARGET CARDS ═══ */
-.targets-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 14px;
-}
-
-.target-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 18px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  position: relative;
-  overflow: hidden;
-  animation: fadeInUp 0.4s ease both;
-}
-.target-card:nth-child(1) { animation-delay: 0.05s; }
-.target-card:nth-child(2) { animation-delay: 0.1s; }
-.target-card:nth-child(3) { animation-delay: 0.15s; }
-.target-card:nth-child(4) { animation-delay: 0.2s; }
-.target-card:nth-child(5) { animation-delay: 0.25s; }
-.target-card:nth-child(6) { animation-delay: 0.3s; }
-.target-card::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--border-light), transparent);
-}
-.target-card:hover {
-  border-color: var(--accent-dim);
-  box-shadow: 0 4px 20px rgba(0,0,0,0.4), 0 0 1px var(--accent-soft);
-  transform: translateY(-2px);
-}
-
-.tc-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-.tc-symbol {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.tc-code {
-  font-family: var(--font-mono);
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--accent);
-}
-.tc-badge {
-  font-size: 9px;
-  font-weight: 700;
-  color: var(--text-muted);
-  background: var(--bg-deep);
-  border: 1px solid var(--border);
-  padding: 1px 5px;
-  border-radius: 3px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.tc-contracts {
-  display: flex;
-  align-items: baseline;
-  gap: 3px;
-}
-.tc-num {
-  font-family: var(--font-mono);
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-.tc-unit {
-  font-size: 10px;
-  color: var(--text-muted);
-}
-
-.tc-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 14px;
-}
-
-/* Price block */
-.tc-price-block {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-.tc-price {
-  font-family: var(--font-mono);
-  font-size: 32px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.02em;
-  line-height: 1;
-}
-.tc-vol-badge {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  background: var(--bg-deep);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 3px 8px;
-}
-.tc-vol-lbl {
-  font-size: 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  font-weight: 700;
-}
-.tc-vol-val {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-/* Ratio bar */
-.tc-ratio-bar {
-  height: 8px;
-  border-radius: 4px;
-  overflow: hidden;
-  display: flex;
-  background: var(--bg-deep);
-  margin-bottom: 6px;
-}
-.tc-bar-call {
-  background: var(--up);
-  height: 100%;
-  transition: width 0.4s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 2px;
-}
-.tc-bar-put {
-  background: var(--down);
-  height: 100%;
-  transition: width 0.4s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 2px;
-}
-.tc-bar-text {
-  font-size: 8px;
-  font-weight: 700;
-  color: var(--bg-deep);
-  white-space: nowrap;
-}
-.tc-ratio-labels {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  margin-bottom: 12px;
-}
-.tc-lbl-call { color: var(--up); }
-.tc-lbl-put  { color: var(--down); }
-
-/* Footer stats */
-.tc-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-.tc-stat {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-.tc-st-lbl {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-}
-.tc-st-val {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 600;
-}
-.tc-sep {
-  width: 1px;
-  height: 24px;
-  background: var(--border);
-}
-
-/* ═══ CONTRACTS TABLE ═══ */
-.contracts-table-wrap {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: auto;
-  box-shadow: var(--shadow-card);
-  max-height: 520px;
-}
-
-.contracts-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-  min-width: 700px;
-}
-
-.contracts-table thead {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-}
-
-.contracts-table th {
-  background: var(--bg-primary);
-  color: var(--text-muted);
-  font-weight: 600;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 10px 14px;
-  text-align: left;
-  border-bottom: 1px solid var(--border-light);
-  white-space: nowrap;
-}
-.contracts-table th.th-num {
-  text-align: right;
-}
-
-.contracts-table td {
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
-}
-
-.c-row {
-  cursor: pointer;
-  transition: background 0.1s;
-}
-.c-row:hover {
-  background: var(--bg-row-hover);
-}
-.c-row:last-child td {
-  border-bottom: none;
-}
-
-/* Code cell */
-.td-code { min-width: 180px; }
-.c-code-badge {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.c-direction {
-  font-size: 9px;
-  font-weight: 700;
-  color: var(--bg-deep);
-  padding: 2px 5px;
-  border-radius: 3px;
-  flex-shrink: 0;
-  letter-spacing: 0.04em;
-}
-.c-code-name {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  overflow: hidden;
-}
-.c-code {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--accent);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.c-target {
-  font-size: 10px;
-  color: var(--text-muted);
-}
-
-/* Type tag */
-.td-type { width: 60px; }
-.c-type-tag {
-  display: inline-block;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 4px;
-  border: 1px solid;
-  background: transparent;
-}
-
-/* Numbers */
-.td-num {
-  text-align: right;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  white-space: nowrap;
-}
-.td-greek {
-  color: var(--text-secondary);
-}
-
-.strike-val {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.strike-atm {
-  color: var(--accent);
-  font-weight: 700;
-  position: relative;
-}
-.strike-atm::after {
-  content: 'ATM';
-  font-size: 8px;
-  font-weight: 700;
-  background: var(--accent);
-  color: var(--bg-deep);
-  padding: 1px 4px;
-  border-radius: 2px;
-  margin-left: 4px;
-  vertical-align: middle;
-}
-.strike-near {
-  color: var(--accent-dim);
-}
-
-.c-price {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.greek-val {
-  font-size: 12px;
-}
-
-/* Empty state */
-.contracts-empty {
-  padding: 60px 20px;
-  text-align: center;
-  color: var(--text-muted);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-}
-.empty-icon {
-  font-size: 32px;
-  margin-bottom: 12px;
-  color: var(--border-light);
-}
-
-/* ═══ K-LINE CHART ═══ */
-.section-kline {
-  margin-bottom: 24px;
-}
-
-.kline-chart-wrap {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: hidden;
-  box-shadow: var(--shadow-card);
-  position: relative;
-  height: 240px;
-}
-
-.kline-canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-.kline-targets {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.kline-target-btn {
-  padding: 4px 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-deep);
-  color: var(--text-muted);
-  font-size: 11px;
-  font-family: var(--font-mono);
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.kline-target-btn:hover {
-  border-color: var(--accent-dim);
-  color: var(--text-secondary);
-}
-
-.kline-target-btn.active {
-  background: var(--accent);
-  color: var(--bg-deep);
-  border-color: var(--accent);
-}
-
-.kline-empty {
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-}
-
-.kline-empty .empty-icon {
-  font-size: 28px;
-  margin-bottom: 10px;
-  color: var(--border-light);
-}
-
-.kline-empty p {
-  font-size: 12px;
-  margin: 0;
-}
-
-/* ═══ Responsive ═══ */
-@media (max-width: 900px) {
-  .hero-bar {
-    flex-direction: column;
-    gap: 16px;
-    padding: 16px;
-  }
-  .hero-center {
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-  .hero-stat-value {
-    font-size: 20px;
-  }
-  .hero-right {
-    align-items: flex-start;
-  }
-  .targets-cards {
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  }
-  .tc-price {
-    font-size: 26px;
-  }
+/* ================= 响应式 ================= */
+@media (max-width: 960px) {
+  .feat-inner, .feat.flip .feat-inner { grid-template-columns: 1fr; gap: 36px; padding: 80px 20px; }
+  .feat.flip .feat-copy { order: 1; }
+  .feat.flip .feat-visual { order: 2; }
+  .feat-no { font-size: 56px; }
 }
 @media (max-width: 768px) {
-  .hero-bar { padding: 12px 14px; }
-  .hero-stat-value { font-size: 16px; }
-  .hero-stat-label { font-size: 9px; }
-  .targets-cards { grid-template-columns: 1fr; }
-  .tc-card { padding: 14px; }
-  .tc-price { font-size: 22px; }
-  .tc-change { font-size: 12px; }
-  .tc-detail-grid { grid-template-columns: 1fr 1fr; }
-  .section-title { font-size: 12px; }
+  .h-nav { padding: 0 16px; height: 54px; }
+  .h-links { display: none; }
+  .hero { padding: 96px 16px 70px; }
+  .hero-actions .btn-accent, .hero-actions .btn-ghost { width: 100%; justify-content: center; }
+  .tickers { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .tk { min-width: 0; }
+  .scroll-hint { display: none; }
+  .srcs { padding: 40px 16px 10px; }
+  .outro { padding: 90px 16px 0; }
+  .h-footer { margin-top: 60px; flex-direction: column; align-items: center; gap: 4px; }
+}
+@media (max-width: 420px) {
+  .tickers { grid-template-columns: 1fr; }
+}
+
+/* ================= 降低动效 ================= */
+@media (prefers-reduced-motion: reduce) {
+  .rv, .tq-row, .q-row, .candle, .feat-copy::before, .payoff-area { transition: none !important; }
+  .rv, .tq-row, .q-row { opacity: 1 !important; transform: none !important; }
+  .candle { transform: none !important; }
+  .feat-copy::before { transform: scaleY(1) !important; }
+  .payoff-area { opacity: 1 !important; }
+  .maline, .payoff-line, .smile-line { stroke-dashoffset: 0 !important; }
+  .scroll-hint i::after { animation: none; }
 }
 </style>

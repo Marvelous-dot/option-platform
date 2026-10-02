@@ -1,28 +1,26 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
 import App from './App.vue'
+import Home from './views/Home.vue'
+import TQuote from './views/TQuote.vue'
+import Quotes from './views/Quotes.vue'
+import Kline from './views/Kline.vue'
+import Strategy from './views/Strategy.vue'
+import Volatility from './views/Volatility.vue'
+import ContractDetail from './views/ContractDetail.vue'
 import './styles/global.css'
-
-const Home = () => import('./views/Home.vue')
-const Quotes = () => import('./views/Quotes.vue')
-const ContractDetail = () => import('./views/ContractDetail.vue')
-const TQuote = () => import('./views/TQuote.vue')
-const Volatility = () => import('./views/Volatility.vue')
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', component: Home },
-    { path: '/quotes', component: Quotes },
     { path: '/tquote', component: TQuote },
+    { path: '/quotes', component: Quotes },
+    { path: '/kline', component: Kline },
+    { path: '/strategy', component: Strategy },
+    { path: '/volatility', component: Volatility },
     { path: '/contract/:code', component: ContractDetail },
-    { path: '/volatility', component: Volatility }
-  ]
+  ],
 })
 
-const app = createApp(App)
-app.use(router)
-app.use(ElementPlus)
-app.mount('#app')
+createApp(App).use(router).mount('#app')

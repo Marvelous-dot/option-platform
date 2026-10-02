@@ -1,725 +1,263 @@
-<script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { Search, Refresh } from '@element-plus/icons-vue'
-
-const router = useRouter()
-
-const state = ref(null)
-const targets = ref([])
-const loading = ref(true)
-const lastRefresh = ref('')
-
-const searchQuery = ref('')
-const targetFilter = ref('all')
-const typeFilter = ref('all')
-const expiryFilter = ref('all')
-const quickView = ref('none')
-const sortField = ref('option_code')
-const sortOrder = ref('asc')
-const currentPage = ref(1)
-const pageSize = 30
-
-const quickViews = [
-  { label: '当月ATM', value: 'atm_near' },
-  { label: '当月全部', value: 'near_month' },
-  { label: '次月ATM', value: 'atm_next' },
-  { label: '虚值认购', value: 'otm_calls' },
-  { label: '虚值认沽', value: 'otm_puts' },
-  { label: '清除', value: 'none' },
-]
-
-const fetchState = async () => {
-  try {
-    const res = await fetch('/api/state')
-    state.value = await res.json()
-    lastRefresh.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-  } catch (e) {
-    console.error('Failed to fetch state:', e)
-  }
-}
-
-const fetchTargets = async () => {
-  try {
-    const res = await fetch('/api/targets')
-    targets.value = (await res.json()).targets || []
-  } catch (e) {
-    console.error('Failed to fetch targets:', e)
-  }
-}
-
-onMounted(() => {
-  fetchState()
-  fetchTargets()
-})
-
-const refreshInterval = setInterval(() => {
-  fetchState()
-  fetchTargets()
-}, 30000)
-
-onUnmounted(() => clearInterval(refreshInterval))
-
-// Flatten all contracts into a single array
-const allContracts = computed(() => {
-  const contracts = []
-  for (const t of targets.value) {
-    for (const c of (t.contracts || [])) {
-      contracts.push({ ...t, ...c })
-    }
-  }
-  return contracts
-})
-
-// Available expiry dates
-const availableExpiries = computed(() => {
-  const set = new Set()
-  for (const c of allContracts.value) {
-    if (c.expiry_date) set.add(c.expiry_date)
-  }
-  return Array.from(set).sort()
-})
-
-// Filtered + searched contracts
-const filteredContracts = computed(() => {
-  let result = allContracts.value
-
-  if (searchQuery.value) {
-    const q = searchQuery.value.toLowerCase()
-    result = result.filter(c =>
-      String(c.option_code).includes(q) ||
-      (c.option_name || '').toLowerCase().includes(q)
-    )
-  }
-
-  if (targetFilter.value !== 'all') {
-    result = result.filter(c => c.target === targetFilter.value)
-  }
-
-  if (typeFilter.value !== 'all') {
-    result = result.filter(c => c.option_type === typeFilter.value)
-  }
-
-  if (expiryFilter.value !== 'all') {
-    result = result.filter(c => c.expiry_date === expiryFilter.value)
-  }
-
-  // Quick view filters
-  if (quickView.value && quickView.value !== 'none') {
-    const now = new Date()
-    const nearMonth = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`
-    const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
-    const nextMonth = `${nextMonthDate.getFullYear()}${String(nextMonthDate.getMonth() + 1).padStart(2, '0')}`
-
-    if (quickView.value === 'near_month') {
-      result = result.filter(c => c.expiry_date && c.expiry_date.startsWith(nearMonth))
-    } else if (quickView.value === 'atm_near' || quickView.value === 'atm_next') {
-      const prefix = quickView.value === 'atm_near' ? nearMonth : nextMonth
-      result = result.filter(c => c.expiry_date && c.expiry_date.startsWith(prefix))
-      // Keep only ATM ± 3 strikes
-      if (result.length > 0) {
-        const spotPrices = [...new Set(result.map(c => c.target_price))]
-        if (spotPrices.length > 0) {
-          const spot = spotPrices[0]
-          const strikes = [...new Set(result.map(c => c.strike_price))].sort((a, b) => a - b)
-          const atmIdx = strikes.reduce((best, s, i) =>
-            Math.abs(s - spot) < Math.abs(strikes[best] - spot) ? i : best, 0)
-          const minIdx = Math.max(0, atmIdx - 3)
-          const maxIdx = Math.min(strikes.length - 1, atmIdx + 3)
-          const allowed = new Set(strikes.slice(minIdx, maxIdx + 1))
-          result = result.filter(c => allowed.has(c.strike_price))
-        }
-      }
-    } else if (quickView.value === 'otm_calls') {
-      result = result.filter(c => c.option_type === '认购' && c.strike_price > c.target_price)
-    } else if (quickView.value === 'otm_puts') {
-      result = result.filter(c => c.option_type === '认沽' && c.strike_price < c.target_price)
-    }
-  }
-
-  // Sort
-  result.sort((a, b) => {
-    let aVal = a[sortField.value]
-    let bVal = b[sortField.value]
-    if (aVal == null) aVal = ''
-    if (bVal == null) bVal = ''
-    if (typeof aVal === 'string') aVal = aVal.toLowerCase()
-    if (typeof bVal === 'string') bVal = bVal.toLowerCase()
-    if (aVal < bVal) return sortOrder.value === 'asc' ? -1 : 1
-    if (aVal > bVal) return sortOrder.value === 'asc' ? 1 : -1
-    return 0
-  })
-
-  return result
-})
-
-// Paginated
-const pagedContracts = computed(() => {
-  const start = (currentPage.value - 1) * pageSize
-  return filteredContracts.value.slice(start, start + pageSize)
-})
-
-const totalPages = computed(() => Math.max(1, Math.ceil(filteredContracts.value.length / pageSize)))
-
-function handleSort(field) {
-  if (sortField.value === field) {
-    sortOrder.value = sortOrder.value === 'asc' ? 'desc' : 'asc'
-  } else {
-    sortField.value = field
-    sortOrder.value = 'asc'
-  }
-}
-
-const changeClass = (v) => {
-  if (v == null) return 'val-neu'
-  return v >= 0 ? 'val-up' : 'val-down'
-}
-
-const getTagClass = (type) => type === '认购' ? 'tag-call' : 'tag-put'
-
-const totalContracts = computed(() => filteredContracts.value.length)
-
-// ── Methods (migrated from options API) ──
-function applyQuickView(value) {
-  quickView.value = quickView.value === value ? 'none' : value
-  if (quickView.value === 'none') {
-    expiryFilter.value = 'all'
-    typeFilter.value = 'all'
-  }
-  currentPage.value = 1
-}
-
-function formatVolume(v) {
-  if (v == null) return '--'
-  if (v >= 10000) return (v / 10000).toFixed(1) + '万'
-  return v.toLocaleString()
-}
-
-function formatExpiry(expiryStr) {
-  if (!expiryStr || expiryStr.length < 8) return expiryStr
-  const m = parseInt(expiryStr.slice(4, 6))
-  const d = parseInt(expiryStr.slice(6, 8))
-  return `${m}月${d}日`
-}
-
-// ── Pagination computed (migrated from options API) ──
-const visiblePages = computed(() => {
-  const total = totalPages.value
-  const current = currentPage.value
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
-  const pages = []
-  const start = Math.max(1, current - 2)
-  const end = Math.min(total, current + 2)
-  if (start > 1) { pages.push(1); if (start > 2) pages.push('...') }
-  for (let i = start; i <= end; i++) pages.push(i)
-  if (end < total) { if (end < total - 1) pages.push('...'); pages.push(total) }
-  return pages
-})
-
-// Reset to page 1 when filters change
-onMounted(() => {
-  watch([searchQuery, targetFilter, typeFilter, expiryFilter], () => {
-    currentPage.value = 1
-  })
-})
-</script>
-
 <template>
-  <div class="page-quotes">
-    <div class="page-header">
-      <h2 class="page-title">全量合约行情</h2>
-      <div class="page-meta">
-        <span class="meta-count">{{ totalContracts }} 条合约</span>
-        <span class="meta-sep">·</span>
-        <span class="meta-time">最后更新 {{ lastRefresh || '--' }}</span>
-        <el-button :link="true" @click="fetchState" class="refresh-btn">
-          <el-icon><Refresh /></el-icon>
-          <span>刷新</span>
-        </el-button>
+  <section class="quotes-page">
+    <div class="page-head">
+      <div class="ph-title">
+        <span class="ph-kicker">ALL CONTRACTS · 筛选 / 排序 / 导出</span>
+        <h1>全量行情</h1>
+        <p class="ph-desc">按标的查看全部挂牌到期合约，点表头排序、点合约进详情。IV / Greeks 为数据源计算值，口径未核验；报价可用不等于实时。</p>
+      </div>
+      <div class="ph-actions">
+        <button type="button" class="export" @click="exportCsv" :disabled="loading || !data?.rows?.length">导出 CSV</button>
       </div>
     </div>
 
-    <!-- Filters -->
-    <div class="filter-bar">
-      <div class="filter-row">
-        <el-input
-          v-model="searchQuery"
-          placeholder="搜索合约代码或名称"
-          clearable
-          :clearable="true"
-          class="filter-search"
-        >
-          <template #prefix>
-            <el-icon><Search /></el-icon>
-          </template>
-        </el-input>
+    <form class="filters filter-card" @submit.prevent="load">
+      <label>标的<select v-model="target" @change="changeTarget"><option v-for="t in targets" :key="t.target" :value="t.target">{{ t.target }} {{ t.name }}</option></select></label>
+      <label>到期日<select v-model="expiry"><option value="">全部到期日</option><option v-for="e in expiries" :key="e" :value="e">{{ e }}</option></select></label>
+      <label>方向<select v-model="type"><option value="">全部</option><option value="call">认购</option><option value="put">认沽</option></select></label>
+      <label>虚实值<select v-model="money"><option value="all">全部</option><option value="atm">ATM（最近行权价）</option><option value="otm">虚值</option></select></label>
+      <label>搜索<input v-model="search" placeholder="合约代码 / 名称" /></label>
+      <label>排序<select v-model="sort"><option v-for="[key, label] in sorts" :key="key" :value="key">{{ label }}</option></select></label>
+      <label>顺序<select v-model="order"><option value="asc">升序</option><option value="desc">降序</option></select></label>
+      <label>每页<select :value="pageSize" @change="changePageSize(Number($event.target.value))">
+        <option :value="0">全部</option><option :value="50">50</option><option :value="100">100</option><option :value="200">200</option>
+      </select></label>
+      <button type="submit" :disabled="loading">{{ loading ? '加载中…' : '查询 / 刷新' }}</button>
+    </form>
 
-        <el-select
-          v-model="targetFilter"
-          placeholder="全部标的"
-          clearable
-          :clearable="true"
-          class="filter-target"
-        >
-          <el-option label="全部标的" value="all" />
-          <el-option
-            v-for="t in targets"
-            :key="t.target"
-            :label="`${t.target} ${t.target_name}`"
-            :value="t.target"
-          />
-        </el-select>
-
-        <el-radio-group v-model="typeFilter" class="filter-type">
-          <el-radio-button :value="'all'">全部</el-radio-button>
-          <el-radio-button :value="'认购'">认购</el-radio-button>
-          <el-radio-button :value="'认沽'">认沽</el-radio-button>
-        </el-radio-group>
-
-        <el-select
-          v-model="expiryFilter"
-          placeholder="全部到期日"
-          clearable
-          :clearable="true"
-          class="filter-expiry"
-        >
-          <el-option label="全部到期日" value="all" />
-          <el-option
-            v-for="exp in availableExpiries"
-            :key="exp"
-            :label="formatExpiry(exp)"
-            :value="exp"
-          />
-        </el-select>
-
-        <!-- 快捷视图 -->
-        <div class="filter-quick">
-          <button
-            v-for="qv in quickViews"
-            :key="qv.value"
-            :class="['quick-btn', { active: quickView === qv.value }]"
-            @click="applyQuickView(qv.value)"
-          >
-            {{ qv.label }}
-          </button>
-        </div>
-      </div>
+    <div class="toolbar">
+      <span class="toolbar-label">快捷视图</span>
+      <button type="button" @click="quick(0, 'atm')" :disabled="loading || !expiries.length">近月 ATM</button>
+      <button type="button" @click="quick(1, 'atm')" :disabled="loading || expiries.length < 2">次近月 ATM</button>
+      <button type="button" @click="quick(0, 'otm')" :disabled="loading || !expiries.length">近月虚值</button>
+      <button type="button" @click="quick(1, 'otm')" :disabled="loading || expiries.length < 2">次近月虚值</button>
+      <span class="toolbar-info" v-if="data">{{ status(data.data_status) }} · {{ data.status_detail }} · 查询范围 {{ data.contract_count }} 个挂牌合约</span>
     </div>
 
-    <!-- Table -->
-    <div class="table-wrapper">
-      <table class="contract-table">
-        <thead>
-          <tr>
-            <th @click="handleSort('option_code')" class="sortable" :class="{ active: sortField === 'option_code' }">
-              合约代码 <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th>合约名称</th>
-            <th @click="handleSort('target')" class="sortable" :class="{ active: sortField === 'target' }">
-              标的 <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('expiry_date')" class="sortable" :class="{ active: sortField === 'expiry_date' }">
-              到期日 <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('strike_price')" class="sortable numeric" :class="{ active: sortField === 'strike_price' }">
-              行权价 <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('last_price')" class="sortable numeric" :class="{ active: sortField === 'last_price' }">
-              最新价 <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('change_pct')" class="sortable numeric" :class="{ active: sortField === 'change_pct' }">
-              涨跌幅 <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('delta')" class="sortable numeric" :class="{ active: sortField === 'delta' }">
-              DELTA <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('gamma')" class="sortable numeric" :class="{ active: sortField === 'gamma' }">
-              GAMMA <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('theta')" class="sortable numeric" :class="{ active: sortField === 'theta' }">
-              THETA <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('vega')" class="sortable numeric" :class="{ active: sortField === 'vega' }">
-              VEGA <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th @click="handleSort('implied_volatility')" class="sortable numeric" :class="{ active: sortField === 'implied_volatility' }">
-              IV <span class="sort-arrow">{{ sortOrder === 'asc' ? '↑' : '↓' }}</span>
-            </th>
-            <th>类型</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="c in pagedContracts"
-            :key="c.option_code"
-            class="contract-row"
-            :class="c.option_type === '认购' ? 'row-call' : 'row-put'"
-            @click="router.push(`/contract/${c.option_code}`)"
-          >
-            <td class="cell-code">{{ c.option_code }}</td>
-            <td class="cell-name">{{ c.option_name }}</td>
-            <td>
-              <span class="cell-target" @click.stop="router.push('/quotes')">
-                {{ c.target }}
-              </span>
-            </td>
-            <td class="cell-mono">{{ c.expiry_date ? formatExpiry(c.expiry_date) : '--' }}</td>
-            <td class="cell-mono">{{ c.strike_price != null ? Number(c.strike_price).toFixed(3) : '--' }}</td>
-            <td class="cell-mono cell-price">{{ c.last_price != null ? Number(c.last_price).toFixed(4) : '--' }}</td>
-            <td class="cell-mono" :class="changeClass(c.change_pct)">
-              {{ c.change_pct != null ? (c.change_pct >= 0 ? '+' : '') + Number(c.change_pct).toFixed(2) + '%' : '--' }}
-            </td>
-            <td class="cell-mono">{{ c.delta != null ? Number(c.delta).toFixed(4) : '--' }}</td>
-            <td class="cell-mono">{{ c.gamma != null ? Number(c.gamma).toFixed(4) : '--' }}</td>
-            <td class="cell-mono">{{ c.theta != null ? Number(c.theta).toFixed(4) : '--' }}</td>
-            <td class="cell-mono">{{ c.vega != null ? Number(c.vega).toFixed(4) : '--' }}</td>
-            <td class="cell-mono">{{ c.implied_volatility != null ? (Number(c.implied_volatility) * 100).toFixed(1) + '%' : '--' }}</td>
-            <td>
-              <span class="cell-tag" :class="getTagClass(c.option_type)">{{ c.option_type }}</span>
-            </td>
-            <td>
-              <span class="cell-action" @click.stop="router.push(`/contract/${c.option_code}`)">详情 →</span>
-            </td>
-          </tr>
-        </tbody>
+    <p v-if="error" role="alert">{{ error }}</p>
+    <p v-if="data" class="ts-bar">
+      <span class="ts-dot"></span>
+      本批数据抓取于 {{ data.rows?.[0]?.fetched_at || '--' }} · 非实时快照，缺失字段显示"不可用" · 虚实值按各到期日快照的标的价格判断（可能非当日）
+    </p>
+    <div class="pager" v-if="pageSize > 0 && data?.rows?.length">
+      <button type="button" :disabled="!hasPrev() || loading" @click="prevPage">上一页</button>
+      <span class="pager-info">第 {{ page + 1 }} / {{ Math.max(1, Math.ceil(totalRows() / pageSize)) }} 页 · 共 {{ totalRows() }} 条</span>
+      <button type="button" :disabled="!hasNext() || loading" @click="nextPage">下一页</button>
+    </div>
+    <div class="table-wrap" v-if="data?.rows.length">
+      <table>
+        <thead><tr>
+          <th>合约</th><th>方向</th><th>到期日</th>
+          <th class="sortable" :class="{ active: sort === 'strike', desc: sort === 'strike' && order === 'desc' }" @click="sortBy('strike')">行权价</th>
+          <th class="sortable" :class="{ active: sort === 'last_price', desc: sort === 'last_price' && order === 'desc' }" @click="sortBy('last_price')">最新价</th>
+          <th class="sortable" :class="{ active: sort === 'iv', desc: sort === 'iv' && order === 'desc' }" @click="sortBy('iv')">IV</th>
+          <th class="sortable" :class="{ active: sort === 'delta', desc: sort === 'delta' && order === 'desc' }" @click="sortBy('delta')">Delta</th>
+          <th class="sortable" :class="{ active: sort === 'gamma', desc: sort === 'gamma' && order === 'desc' }" @click="sortBy('gamma')">Gamma</th>
+          <th class="sortable" :class="{ active: sort === 'theta', desc: sort === 'theta' && order === 'desc' }" @click="sortBy('theta')">Theta</th>
+          <th class="sortable" :class="{ active: sort === 'vega', desc: sort === 'vega' && order === 'desc' }" @click="sortBy('vega')">Vega</th>
+          <th class="sortable" :class="{ active: sort === 'volume', desc: sort === 'volume' && order === 'desc' }" @click="sortBy('volume')">成交量</th>
+          <th>可用性 / 时效</th><th>来源 / 时间</th>
+        </tr></thead>
+        <tbody><tr v-for="r in data.rows" :key="r.option_code">
+          <td><router-link :to="contractLink(r)">{{ r.name }}</router-link><small>{{ r.option_code }}</small></td>
+          <td>{{ r.option_type === 'call' ? '认购' : '认沽' }}</td><td>{{ r.expiry }}</td>
+          <td>{{ number(r.strike) }}</td><td>{{ number(r.last_price) }}</td><td>{{ number(r.iv, true) }}</td>
+          <td v-for="key in ['delta', 'gamma', 'theta', 'vega']" :key="key">{{ number(r[key]) }}</td>
+          <td>{{ r.volume ?? '--' }}</td><td>{{ status(r.data_status) }}<small>{{ freshness(r.freshness) }}</small></td>
+          <td>{{ r.source || '--' }}<small>行情：{{ r.market_ts || '未知，不代表实时' }}</small><small>抓取：{{ r.fetched_at || '--' }}</small><small>标的：{{ number(r.spot?.price) }} · {{ r.spot?.source || '--' }} · {{ r.spot?.market_time || '源时间未知' }}</small></td>
+        </tr></tbody>
       </table>
-      <div v-if="pagedContracts.length === 0" class="empty-state">
-        <p>暂无数据</p>
-      </div>
     </div>
-
-    <!-- Pagination -->
-    <div class="pagination-bar" v-if="totalPages > 1">
-      <div class="pagination-info">
-        第 {{ currentPage }} / {{ totalPages }} 页，共 {{ totalContracts }} 条
-      </div>
-      <div class="pagination-btns">
-        <button
-          class="page-btn"
-          :disabled="currentPage <= 1"
-          @click="currentPage--"
-        >
-          ‹
-        </button>
-        <button
-          v-for="pg in visiblePages"
-          :key="pg"
-          class="page-btn"
-          :class="{ active: pg === currentPage }"
-          @click="currentPage = pg"
-        >
-          {{ pg }}
-        </button>
-        <button
-          class="page-btn"
-          :disabled="currentPage >= totalPages"
-          @click="currentPage++"
-        >
-          ›
-        </button>
-      </div>
-    </div>
-  </div>
+    <p v-else-if="!loading && data">当前条件下没有合约。数据源缺失时不生成模拟行情。</p>
+  </section>
 </template>
 
-
+<script setup>
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { readState, writeState } from '../utils/remember.mjs'
+const remembered = readState('quotes', {})
+const targets = ref([]), expiries = ref([])
+const target = ref(remembered.target || '510050')
+const expiry = ref(remembered.expiry || ''), type = ref(remembered.type || ''), money = ref(remembered.money || 'all')
+const search = ref(remembered.search || '')
+const sort = ref(remembered.sort || 'option_code'), order = ref(remembered.order || 'asc')
+const data = ref(null), loading = ref(false), error = ref('')
+const pageSize = ref(remembered.pageSize || 50)  // 0 = 全部
+const page = ref(0)       // 0-indexed
+const sorts = [['option_code', '合约代码'], ['strike', '行权价'], ['last_price', '最新价'], ['iv', 'IV'], ['delta', 'Delta'], ['gamma', 'Gamma'], ['theta', 'Theta'], ['vega', 'Vega'], ['volume', '成交量']]
+// Persist user-chosen filters (not the fetched data). Skip the first target change
+// which is part of initial restore.
+const firstTargetChange = { value: true }
+watch([target, expiry, type, money, search, sort, order, pageSize], () => {
+  if (firstTargetChange.value) { firstTargetChange.value = false; return }
+  writeState('quotes', { target: target.value, expiry: expiry.value, type: type.value, money: money.value, search: search.value, sort: sort.value, order: order.value, pageSize: pageSize.value })
+})
+let controller, generation = 0
+const contractLink = r => `/contract/${encodeURIComponent(r.option_code)}`
+const number = (v, percent = false) => v == null || !Number.isFinite(Number(v)) ? '--' : percent ? (v * 100).toFixed(2) + '%' : Number(v).toFixed(4)
+const status = s => ({ok: '报价可用', partial: '部分可用', stale: '过期快照', unavailable: '不可用'}[s] || '未知')
+const freshness = s => ({fresh: '当日源时间', stale: '过期', unknown: '时效未知'}[s] || '时效未知')
+const totalRows = () => data.value?.total ?? data.value?.rows?.length ?? 0
+const currentPageCount = () => data.value?.rows?.length ?? 0
+const hasPrev = () => page.value > 0
+// A next page exists only when the current window is full AND more rows remain
+// beyond it. An exactly-full last page correctly reports no next page.
+const hasNext = () => pageSize.value > 0 && currentPageCount() === pageSize.value
+  && (page.value + 1) * pageSize.value < totalRows()
+async function load() {
+  controller?.abort()
+  controller = new AbortController()
+  const request = ++generation
+  const signal = controller.signal
+  loading.value = true
+  error.value = ''
+  data.value = null
+  try {
+    const params = new URLSearchParams({expiry: expiry.value, option_type: type.value, search: search.value, moneyness: money.value, sort: sort.value, order: order.value})
+    if (pageSize.value > 0) {
+      params.set('limit', String(pageSize.value))
+      params.set('offset', String(page.value * pageSize.value))
+    }
+    const res = await fetch(`/api/quotes/${target.value}?${params}`, {signal})
+    const result = await res.json()
+    if (!res.ok) throw new Error(result.detail || `HTTP ${res.status}`)
+    if (request !== generation) return
+    data.value = result
+    expiries.value = result.expiries || []
+  } catch (e) {
+    if (request === generation && e.name !== 'AbortError') error.value = `获取失败：${e.message}`
+  } finally {
+    if (request === generation) loading.value = false
+  }
+}
+function changeTarget() {
+  expiry.value = ''
+  expiries.value = []
+  page.value = 0
+  load()
+}
+// Header click = set the sort column; clicking the active column toggles direction.
+function sortBy(key) {
+  if (sort.value === key) {
+    order.value = order.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    sort.value = key
+    order.value = 'asc'
+  }
+  page.value = 0
+  load()
+}
+function quick(index, value) {
+  expiry.value = expiries.value[index]
+  money.value = value
+  search.value = ''
+  type.value = ''
+  page.value = 0
+  load()
+}
+function changePageSize(n) {
+  pageSize.value = n
+  page.value = 0
+  load()
+}
+// CSV 导出：拉当前筛选全量（不受分页 limit 约束），null 原样留空，带 BOM 供 Excel
+const CSV_COLS = [
+  ['合约代码', r => r.option_code], ['名称', r => r.name], ['标的代码', () => target.value],
+  ['方向', r => r.option_type === 'call' ? '认购' : '认沽'], ['到期日', r => r.expiry],
+  ['行权价', r => r.strike], ['最新价', r => r.last_price], ['IV', r => r.iv],
+  ['Delta', r => r.delta], ['Gamma', r => r.gamma], ['Theta', r => r.theta], ['Vega', r => r.vega],
+  ['成交量', r => r.volume], ['最高价', r => r.high], ['最低价', r => r.low],
+  ['理论价', r => r.theory_price], ['可用性', r => r.data_status], ['时效', r => r.freshness],
+  ['来源', r => r.source], ['行情时间', r => r.market_ts], ['抓取时间', r => r.fetched_at],
+  ['标的价格', r => r.spot?.price ?? null], ['标的来源', r => r.spot?.source ?? ''],
+]
+function csvCell(v) {
+  if (v == null) return ''
+  const s = String(v)
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+}
+async function exportCsv() {
+  const params = new URLSearchParams({expiry: expiry.value, option_type: type.value, search: search.value, moneyness: money.value, sort: sort.value, order: order.value})
+  const res = await fetch(`/api/quotes/${target.value}?${params}`)
+  const d = await res.json()
+  if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`)
+  const rows = d.rows || []
+  const head = CSV_COLS.map(c => c[0]).join(',')
+  const lines = rows.map(r => CSV_COLS.map(c => csvCell(c[1](r))).join(','))
+  const csv = '\uFEFF' + [head, ...lines].join('\r\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `quotes_${target.value}_${new Date().toISOString().slice(0, 10)}.csv`
+  document.body.appendChild(a); a.click(); document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+function prevPage() {
+  if (pageSize.value === 0 || page.value <= 0) return
+  page.value -= 1
+  load()
+}
+function nextPage() {
+  if (pageSize.value === 0) return
+  if (hasNext()) { page.value += 1; load() }
+}
+onMounted(async () => {
+  try {
+    const res = await fetch('/api/targets')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    targets.value = (await res.json()).targets || []
+    if (!targets.value.length) throw new Error('标的目录为空')
+    await load()
+  } catch (e) { error.value = `标的目录获取失败：${e.message}` }
+})
+onUnmounted(() => { generation++; controller?.abort() })
+</script>
 
 <style scoped>
-.page-quotes {
-  animation: fadeIn 0.3s ease;
-}
-
-/* -- Page Header -- */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 16px;
-}
-.page-title {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: 0.02em;
-}
-.page-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-.meta-sep {
-  color: var(--text-muted);
-}
-.refresh-btn {
-  color: var(--text-secondary) !important;
-  padding: 4px 8px !important;
-}
-.refresh-btn:hover {
-  color: var(--accent) !important;
-}
-
-/* -- Filter Bar -- */
-.filter-bar {
-  margin-bottom: 16px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 14px 16px;
-}
-.filter-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.filter-search {
-  flex: 1;
-  min-width: 200px;
-}
-.filter-target {
-  width: 180px;
-}
-.filter-expiry {
-  width: 150px;
-}
-.filter-type {
-  display: flex;
-}
-
-.filter-quick {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.quick-btn {
-  padding: 5px 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-}
-
-.quick-btn:hover {
-  color: var(--text-primary);
-  border-color: var(--accent-dim);
-}
-
-.quick-btn.active {
-  background: var(--accent);
-  color: var(--bg-deep);
-  border-color: var(--accent);
-}
-
-/* -- Custom Table -- */
-.table-wrapper {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.contract-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-.contract-table thead {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-}
-.contract-table th {
-  background: var(--bg-primary);
-  color: var(--text-secondary);
-  font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  padding: 12px 14px;
-  text-align: left;
-  border-bottom: 1px solid var(--border-light);
-  white-space: nowrap;
-}
-.contract-table th.numeric {
-  text-align: right;
-}
-.contract-table th.sortable {
-  cursor: pointer;
-  user-select: none;
-  transition: color 0.15s;
-}
-.contract-table th.sortable:hover {
-  color: var(--text-primary);
-}
-.contract-table th.sortable.active {
-  color: var(--accent);
-}
-.sort-arrow {
-  font-size: 10px;
-  margin-left: 2px;
-  opacity: 0.5;
-}
-.sort-arrow:hover {
-  opacity: 1;
-}
-
-.contract-table td {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-primary);
-}
-.contract-table tbody tr {
-  transition: background 0.1s;
-}
-.contract-table tbody tr.row-call {
-  border-left: 2px solid var(--up, rgba(232,136,62,0.5));
-}
-.contract-table tbody tr.row-put {
-  border-left: 2px solid var(--down, rgba(60,196,160,0.5));
-}
-.contract-table tbody tr:hover {
-  background: var(--bg-row-hover);
-}
-.contract-table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-/* Cell styles */
-.cell-code {
-  font-family: var(--font-mono);
-  color: var(--accent);
-  font-weight: 600;
-  font-size: 12px;
-}
-.cell-name {
-  font-size: 13px;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cell-target {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.cell-target:hover {
-  color: var(--accent);
-}
-.cell-mono {
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-.cell-price {
-  font-weight: 600;
-  text-align: right;
-}
-.cell-volume {
-  text-align: right;
-  color: var(--text-secondary);
-}
-.cell-tag {
-  display: inline-block;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 4px;
-}
-.tag-call {
-  background: var(--tag-认购-bg);
-  color: var(--tag-认购-text);
-}
-.tag-put {
-  background: var(--tag-认沽-bg);
-  color: var(--tag-认沽-text);
-}
-.cell-action {
-  font-size: 12px;
-  color: var(--accent);
-  cursor: pointer;
-  transition: color 0.15s;
-}
-.cell-action:hover {
-  color: var(--accent);
-}
-
-/* Empty state */
-.empty-state {
-  padding: 60px 20px;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 14px;
-}
-
-/* -- Pagination -- */
-.pagination-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 16px;
-  padding: 0 4px;
-}
-.pagination-info {
-  font-size: 12px;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-.pagination-btns {
-  display: flex;
-  gap: 4px;
-}
-.page-btn {
-  min-width: 32px;
-  height: 32px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  border-radius: 4px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.15s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.page-btn:hover:not(:disabled):not(.active) {
-  background: var(--bg-row-hover);
-  color: var(--text-primary);
-  border-color: var(--border-light);
-}
-.page-btn.active {
-  background: var(--accent);
-  color: var(--bg-deep);
-  border-color: var(--accent);
-  font-weight: 700;
-}
-.page-btn:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-
-@media (max-width: 1100px) {
-  .contract-table {
-    font-size: 12px;
-  }
-  .filter-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .filter-search, .filter-target {
-    min-width: auto;
-  }
+.filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; }
+label { display: grid; gap: 7px; font-size: 12px; color: var(--text-dim); }
+select, input, button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 9px; font: inherit; }
+select:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+button { cursor: pointer; font-weight: 600; }
+.toolbar button { background: var(--bg); border: 1px solid var(--border); border-radius: var(--pill); padding: 7px 16px; font-size: 13px; color: var(--text); font-weight: 500; }
+.toolbar button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-glow); }
+.filters button[type=submit] { background: var(--accent); color: var(--accent-text); border: none; border-radius: var(--pill); padding: 9px 22px; font-weight: 700; }
+.filters button[type=submit]:hover { background: var(--accent-hover); }
+button:disabled { opacity: .5; cursor: wait; }
+.export { background: transparent; color: var(--accent-ink); border: 1px solid var(--border); border-radius: var(--pill); padding: 8px 18px; font-weight: 700; }
+.export:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-glow); }
+.pager { display: flex; align-items: center; gap: 14px; margin: 14px 0; font-size: 13px; }
+.pager button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--pill); padding: 7px 18px; font-size: 13px; font-weight: 600; }
+.pager button:hover:not(:disabled) { background: var(--bg-hover); }
+.pager-info { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+th { background: var(--bg-elevated); position: sticky; top: 0; }
+th, td { padding: 12px 14px; white-space: nowrap; border-bottom: 1px solid var(--border); text-align: right; }
+th { color: var(--text-dim); font-weight: 600; font-size: 12px; }
+th.sortable { cursor: pointer; user-select: none; position: relative; }
+th.sortable:hover { color: var(--text); background: var(--bg-hover); }
+th.sortable::after { content: '↕'; margin-left: 6px; font-size: 12px; opacity: .55; }
+th.sortable:hover::after { opacity: .9; color: var(--accent-ink); }
+th.sortable.active { color: var(--accent-ink); }
+th.sortable.active::after { content: '↑'; opacity: 1; color: var(--accent-ink); font-size: 13px; }
+th.sortable.active.desc::after { content: '↓'; opacity: 1; color: var(--accent-ink); font-size: 13px; }
+tbody tr:hover { background: var(--bg-hover); }
+th:first-child, td:first-child, td:last-child { text-align: left; }
+td small { display: block; opacity: .65; margin-top: 5px; font-size: 11px; }
+a { color: var(--accent-ink); font-weight: 600; }
+a:hover { text-decoration: underline; }
+[role=alert] { color: var(--err); }
+/* 窄屏：筛选表单单列堆叠、快捷按钮换行、表头不吸顶、表格字号缩小 */
+@media (max-width: 768px) {
+  .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .toolbar { gap: 6px; }
+  .toolbar button { flex: 1 1 calc(50% - 6px); text-align: center; padding: 8px 10px; font-size: 12px; }
+  .toolbar-info { flex-basis: 100%; margin-left: 0; }
+  .pager { flex-wrap: wrap; gap: 8px; justify-content: center; text-align: center; }
+  th { position: static; }
+  th, td { padding: 10px 10px; font-size: 12px; }
+  td small { font-size: 10px; }
 }
 </style>
