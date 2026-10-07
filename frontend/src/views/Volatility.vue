@@ -31,6 +31,18 @@
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-else-if="!model && !loading" class="empty">加载中或暂无数据</p>
 
+    <div v-if="model.groups && model.groups.length" class="chart-card surface-card">
+      <h2>3D 波动率曲面</h2>
+      <p class="note">
+        行权价 × 到期日 × IV 三维视角；取数遵循 OTM 惯例（行权价低于现价取认沽 IV、不低于现价取认购 IV），
+        并剔除 IV &lt; 2% 的退化值（深度实值认购的源数据伪值）。相邻挂牌点之间线性过渡、不外推、不补缺失。
+        IV 为数据源计算值原样透传、口径未核验。本图始终使用全部到期日，不受上方到期日筛选影响。
+        拖拽旋转视角，滚轮缩放，双击或点「重置视角」复位，悬停数据点可查看具体合约。
+      </p>
+      <VolSurface3D v-if="model.groups.length >= 2" :groups="model.groups" :spot="surfaceSpot" />
+      <p v-else class="empty">到期日不足两张，无法构成曲面。</p>
+    </div>
+
     <template v-if="selected">
       <div class="meta-bar">
         <span>来源：{{ selected.source || 'sina' }}</span>
@@ -158,7 +170,6 @@
       <ul>
         <li><strong>历史 IV 曲线</strong>：需要数据库历史 IV 表，暂不可用。</li>
         <li><strong>历史IV与K线叠加</strong>：需历史 IV 与日 K 对齐，暂不可用。</li>
-        <li><strong>3D 波动率曲面</strong>：需多到期日、多行权价三维数据，暂不可用。</li>
       </ul>
     </div>
   </section>
@@ -168,6 +179,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { buildVolatility, plotSeries, formatIV } from '../utils/volatility.mjs'
 import { readState, writeState } from '../utils/remember.mjs'
+import VolSurface3D from '../components/VolSurface3D.vue'
 
 const targets = [
   { code: '510050', name: '50ETF(华夏上证50)' },
@@ -208,6 +220,19 @@ const selectedRows = computed(() => selected.value?.rows || [])
 const smileChart = computed(() => selected.value ? plotSeries(selected.value.series, { minGap: 46 }) : { ticks: [], yTicks: [], series: [] })
 const termChart = computed(() => model.value ? plotSeries(model.value.termSeries, { minGap: 46 }) : { ticks: [], yTicks: [], series: [] })
 const expiries = computed(() => model.value?.expiries || [])
+// 3D 曲面的标的参考价：优先取各组 ATM 的现价，退而求其次扫行内 spot
+const surfaceSpot = computed(() => {
+  const gs = model.value?.groups || []
+  for (const g of gs) {
+    const p = Number(g.atm?.spot?.price)
+    if (Number.isFinite(p) && p > 0) return p
+  }
+  for (const g of gs) for (const r of g.rows || []) {
+    const p = Number(r.spot?.price)
+    if (Number.isFinite(p) && p > 0) return p
+  }
+  return null
+})
 // 跨期 IV 对比表：每个到期日一行，列出 ATM call / ATM put 的 IV 与差值。
 // 数据来自 buildVolatility 已算好的 groups[].atm，不引入新的数据来源。
 const termComparison = computed(() => {

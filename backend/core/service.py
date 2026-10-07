@@ -68,6 +68,7 @@ class OptionService:
         self._catalog_loaded_at: str | None = None  # 自然时钟，用于展示
         self._catalog_error: str | None = None
         self._tquote_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+        self._minkline_cache: dict[tuple[str, str], tuple[float, dict]] = {}
         self._lock = threading.Lock()
 
     # ---------- 合约目录 ----------
@@ -324,6 +325,80 @@ class OptionService:
             )
         except Exception:
             log.warning("kline cache save %s failed", target_code)
+
+    # ---------- 标的分钟K线 ----------
+
+    MINKLINE_SCALES = {"5m": 5, "15m": 15, "30m": 30, "60m": 60}
+    MINKLINE_LIMITS = (5, 1000)
+    MINKLINE_TTL = 60.0
+
+    def minkline(self, target_code: str, period: str, datalen: int = 240) -> dict:
+        """新浪分钟K（不复权，数据源仅提供近期根数）。
+
+        内存 TTL 60s 缓存（盘中数据，不落盘，重启即新取）；
+        上游失败时降级 stale（不冒充新数据），与日K 同一套 fail-closed 语义。
+        """
+        from core.adapters import fetch_sina_minkline
+
+        if target_code not in TARGETS:
+            raise ValueError("未知标的")
+        if period not in self.MINKLINE_SCALES:
+            raise ValueError(
+                f"不支持的K线周期 {period}（可用: day/{'/'.join(self.MINKLINE_SCALES)}）"
+            )
+        if isinstance(datalen, (bool, float)):
+            raise ValueError("datalen 必须是整数")
+        try:
+            datalen = int(datalen)
+        except (TypeError, ValueError):
+            raise ValueError("datalen 必须是整数")
+        if not self.MINKLINE_LIMITS[0] <= datalen <= self.MINKLINE_LIMITS[1]:
+            raise ValueError(f"datalen 取值范围 {self.MINKLINE_LIMITS[0]}-{self.MINKLINE_LIMITS[1]}")
+
+        cache_key = (target_code, period)
+        with self._lock:
+            cached = self._minkline_cache.get(cache_key)
+            now = time.monotonic()
+            if cached and now - cached[0] < self.MINKLINE_TTL:
+                return cached[1]
+
+        fetched_at = datetime.now(CN).isoformat(timespec="seconds")
+        bars = fetch_sina_minkline(target_code, self.MINKLINE_SCALES[period], datalen)
+        if not bars:
+            if cached:
+                stale = copy.deepcopy(cached[1])
+                stale["data_status"] = "stale"
+                stale["status_detail"] = (
+                    f"上游不可用，展示内存缓存快照 {stale.get('cached_at', '未知')}；"
+                    "获取时间不代表行情时间"
+                )
+                return stale
+            return {
+                "target_code": target_code, "target_name": TARGETS[target_code]["name"],
+                "period": period, "datalen": datalen, "bars": [], "count": 0,
+                "source": "sina", "adjust": "raw(不复权)",
+                "fetched_at": fetched_at, "data_status": "unavailable",
+                "status_detail": f"分钟K({period})数据不可用（数据源失败或返回空）",
+            }
+
+        bars.sort(key=lambda b: b["date"])
+        bars = bars[-datalen:]
+        last = bars[-1]
+        payload = {
+            "target_code": target_code, "target_name": TARGETS[target_code]["name"],
+            "period": period, "datalen": datalen, "bars": bars, "count": len(bars),
+            "first_date": bars[0]["date"], "last_date": last["date"],
+            "last_close": last["close"], "source": "sina", "adjust": "raw(不复权)",
+            "volume_unit": "source_raw", "fetched_at": fetched_at,
+            "data_status": "ok",
+            "status_detail": (
+                f"{len(bars)} 根 {period} 分钟K，最新 {last['date']}；数据源仅提供近期根数，"
+                "分钟K不复权；末根可能尚未收盘，获取时间不代表行情时间"
+            ),
+        }
+        with self._lock:
+            self._minkline_cache[cache_key] = (time.monotonic(), payload)
+        return payload
 
 
     # ---------- T 型报价 ----------

@@ -32,6 +32,7 @@ app.mount("/assets", StaticFiles(directory=DIST / "assets", check_dir=False), na
 @app.get("/quotes", include_in_schema=False)
 @app.get("/kline", include_in_schema=False)
 @app.get("/volatility", include_in_schema=False)
+@app.get("/screener", include_in_schema=False)
 @app.get("/strategy", include_in_schema=False)
 @app.get("/contract/{option_code}", include_in_schema=False)
 def spa_page():
@@ -39,7 +40,7 @@ def spa_page():
     index = DIST / "index.html"
     if not index.is_file():
         raise HTTPException(status_code=503, detail="前端尚未构建")
-    return FileResponse(index, media_type="text/html")
+    return FileResponse(index, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
 app.add_middleware(
     CORSMiddleware,
@@ -131,16 +132,20 @@ def api_quotes(target_code: str, expiry: str | None = None,
 
 
 @app.get("/api/kline/{target_code}")
-def api_kline(target_code: str, days: int = 120):
+def api_kline(target_code: str, days: int = 120, period: str = "day"):
+    """K线。period=day 为腾讯前复权日K（days=交易日数，落盘缓存）；
+    period=5m/15m/30m/60m 为新浪分钟K（days 复用为根数 datalen，内存缓存 60s）。"""
     if target_code not in TARGETS:
         raise HTTPException(status_code=404, detail="未知标的")
     try:
-        return service.kline(target_code, days=days)
+        if period in ("", "day"):
+            return service.kline(target_code, days=days)
+        return service.minkline(target_code, period, datalen=days)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         logging.getLogger(__name__).exception("kline unavailable")
-        raise HTTPException(status_code=503, detail="日K数据暂不可用")
+        raise HTTPException(status_code=503, detail="K线数据暂不可用")
 
 
 @app.get("/api/contract/{option_code}")

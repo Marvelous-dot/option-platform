@@ -66,7 +66,10 @@ function atmFor(rows, strikes, today) {
 
 export function buildVolatility(payload, today = chinaDay()) {
   const rows = (Array.isArray(payload?.rows) ? payload.rows : []).map(r => {
-    const ivValue = ['ok', 'stale'].includes(r.data_status) ? positive(r.iv) : null
+    // 新浪 IV 口径自适应：盘中/收盘后可能返回小数（0.19=19%）或百分数（19.0）。
+    // 真实 IV 极少 <1.5%，故 <1.5 视为小数 ×100；两种口径统一为百分数。
+    const raw = ['ok', 'stale'].includes(r.data_status) ? positive(r.iv) : null
+    const ivValue = raw === null ? null : (raw < 1.5 ? raw * 100 : raw)
     return { ...r, strikeValue: positive(r.strike), ivValue,
       ivStatus: ivValue === null ? 'unavailable' : freshness(r, r.market_ts, today) }
   }).sort((a, b) => String(a.expiry).localeCompare(String(b.expiry))

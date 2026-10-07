@@ -2,13 +2,15 @@
   <section class="kline-page">
     <div class="page-head">
       <div class="ph-title">
-        <span class="ph-kicker">DAILY K-LINE · 日K落盘缓存</span>
+        <span class="ph-kicker">CANDLESTICK · 日K / 分钟K</span>
         <h1>标的 K 线</h1>
-        <p class="ph-desc">红涨绿跌（收盘对比开盘）；日 K 落盘缓存，上游失败仍可回看最近历史（stale 标注）。盘中末根日 K 可能尚未收盘。</p>
+        <p class="ph-desc">红涨绿跌（收盘对比开盘）；日 K 落盘缓存可回看历史，分钟 K（5/15/30/60 分）为盘中数据、不复权、仅近期根数。末根可能尚未收盘。</p>
       </div>
       <div class="ph-actions">
-        <button v-for="d in [60, 120, 250]" :key="d" type="button" class="range-btn"
-          :class="{ active: days === d }" :aria-pressed="days === d" @click="days = d">{{ d }}日</button>
+        <button v-for="[p, label] in PERIODS" :key="p" type="button" class="range-btn"
+          :class="{ active: period === p }" :aria-pressed="period === p" @click="setPeriod(p)">{{ label }}</button>
+        <button v-for="d in rangeOptions" :key="d" type="button" class="range-btn"
+          :class="{ active: days === d }" :aria-pressed="days === d" @click="days = d">{{ period === 'day' ? d + '日' : d + '根' }}</button>
         <button type="button" class="refresh-btn" :disabled="loading || !target" @click="load">{{ loading ? '加载中…' : '刷新' }}</button>
       </div>
     </div>
@@ -24,13 +26,13 @@
     <p v-if="targetError" role="alert">{{ targetError }} <button type="button" @click="loadTargets">重试目录</button></p>
     <div class="statusbar" :class="loading ? 'loading' : data?.data_status === 'ok' ? 'ok' : 'unavailable'" role="status">
       <span class="status-dot"></span>
-      <span class="status-text">{{ loading ? '日K加载中…' : data?.data_status === 'ok' ? '日K数据可用' : '日K不可用' }}</span>
+      <span class="status-text">{{ loading ? 'K线加载中…' : data?.data_status === 'ok' ? 'K线数据可用' : 'K线不可用' }}</span>
       <span v-if="data">{{ data.status_detail || '数据源未提供状态说明' }}</span>
     </div>
     <p v-if="error" role="alert">{{ error }}</p>
     <div v-if="data" class="provenance">
       <p>{{ data.target_name || '名称未知' }} · {{ data.target_code || target }} · 来源：{{ data.source || '未知' }} · {{ adjustmentLabel(data.adjust) }} · 获取时间 {{ data.fetched_at || '未知' }}</p>
-      <p>末根日期 {{ data.last_date || '未知' }} · 末根收盘字段 {{ formatPrice(data.last_close) }}（可能仍变动）· 源返回 {{ data.count ?? '未知' }} 根 / 请求 {{ days }}日，图中 {{ bars.length }} 根，按返回交易日期排列，不填补缺失交易日。</p>
+      <p>末根时间 {{ data.last_date || '未知' }} · 末根收盘字段 {{ formatPrice(data.last_close) }}（可能仍变动）· 源返回 {{ data.count ?? '未知' }} 根 / 请求 {{ rangeLabel }}，图中 {{ bars.length }} 根，按返回时间排列，不填补缺失。</p>
     </div>
     <p v-if="missingPrices || missingVolumes" class="missing" role="status">{{ missingPrices }} 根价格缺失或异常；{{ missingVolumes }} 根成交量不可用。保留日期位置，不绘制伪造柱。</p>
     <div class="chart-card">
@@ -39,7 +41,7 @@
           <span v-for="p in MA_PERIODS" :key="p" class="ma-chip" :class="'ma-' + p">MA{{ p }}</span>
         </p>
         <dl class="ohlc" aria-live="off">
-          <div><dt>日期</dt><dd>{{ activeBar?.date || '不可用' }}</dd></div>
+          <div><dt>{{ dateLabel }}</dt><dd>{{ activeBar?.date || '不可用' }}</dd></div>
           <div v-for="[key, label] in priceFields" :key="key"><dt>{{ label }}</dt><dd>{{ formatPrice(activeBar?.[key]) }}</dd></div>
           <div><dt>成交量</dt><dd>{{ formatVolume(activeBar?.volume) }}</dd></div>
           <div v-for="(p, k) in MA_PERIODS" :key="p"><dt>MA{{ p }}</dt><dd>{{ activeMA[k] == null ? '不可用' : Number(activeMA[k]).toFixed(4) }}</dd></div>
@@ -48,15 +50,15 @@
       <p v-if="activeBar && !activeBar.validPrice" class="missing">本根 OHLC 不完整或范围异常，蜡烛不可用。</p>
       <div ref="chartHost" class="chart-host" :aria-busy="loading">
         <canvas ref="canvas" v-show="bars.length" tabindex="0" role="img"
-          aria-label="标的日K蜡烛与成交量图。移动鼠标、触摸或使用左右方向键查看逐日开高低收。"
+          aria-label="标的K线蜡烛与成交量图。移动鼠标、触摸或使用左右方向键查看逐根开高低收。"
           @pointermove="moveCrosshair" @pointerdown="moveCrosshair" @pointerleave="clearCrosshair"
           @keydown.left.prevent="stepCrosshair(-1)" @keydown.right.prevent="stepCrosshair(1)" @blur="clearCrosshair"></canvas>
         <div v-if="!bars.length" class="empty">
-          <p class="empty-title">{{ loading ? '正在获取当前条件的日K…' : '暂无可绘制的日K' }}</p>
+          <p class="empty-title">{{ loading ? '正在获取当前条件的K线…' : '暂无可绘制的K线' }}</p>
           <p class="empty-detail">{{ error || data?.status_detail || '数据缺失时不展示模拟行情。' }}</p>
         </div>
       </div>
-      <p class="note chart-hint">均线按收盘价本地计算，窗口内缺失收盘则断线不补值；成交量使用原始单位。移动鼠标 / 触摸 / 左右方向键查看开高低收，默认详情为末根（未确认收盘）。</p>
+      <p class="note chart-hint">均线按收盘价本地计算，窗口内缺失收盘则断线不补值；成交量使用原始单位；分钟K不复权、数据源仅提供近期根数。移动鼠标 / 触摸 / 左右方向键查看开高低收，默认详情为末根（未确认收盘）。</p>
     </div>
   </section>
 </template>
@@ -134,6 +136,17 @@ function movingAverage(closes, win) {
 
 const klineRemembered = readState('kline', {})
 const targets = ref([]), target = ref(klineRemembered.target || ''), days = ref(klineRemembered.days || 120)
+const PERIODS = [['day', '日K'], ['5m', '5分'], ['15m', '15分'], ['30m', '30分'], ['60m', '60分']]
+const period = ref(klineRemembered.period || 'day')
+const rangeOptions = computed(() => period.value === 'day' ? [60, 120, 250] : [96, 240, 480])
+const rangeLabel = computed(() => period.value === 'day' ? `${days.value}日` : `${days.value}根`)
+const dateLabel = computed(() => period.value === 'day' ? '日期' : '时间')
+function setPeriod(p) {
+  if (period.value === p) return
+  period.value = p
+  const opts = p === 'day' ? [60, 120, 250] : [96, 240, 480]
+  if (!opts.includes(days.value)) days.value = p === 'day' ? 120 : 240
+}
 const data = ref(null), loading = ref(false), error = ref('')
 const targetLoading = ref(false), targetError = ref('')
 const chartHost = ref(null), canvas = ref(null), hovered = ref(-1)
@@ -151,10 +164,10 @@ const activeMA = computed(() => {
 })
 let controller, targetController, sequence = 0, targetSequence = 0, disposed = false
 let resizeObserver, themeObserver, frame = null, geometry = null, pointerY = null
-// 记住 K线页选中的标的与天数范围
-watch([target, days], () => {
+// 记住 K线页选中的标的、周期与根数范围
+watch([target, days, period], () => {
   if (!target.value) return
-  writeState('kline', { target: target.value, days: days.value })
+  writeState('kline', { target: target.value, days: days.value, period: period.value })
 }, { immediate: false })
 
 async function loadTargets() {
@@ -177,7 +190,7 @@ async function loadTargets() {
   }
 }
 async function load() {
-  const id = ++sequence, code = target.value, range = days.value
+  const id = ++sequence, code = target.value, range = days.value, periodValue = period.value
   controller?.abort()
   controller = new AbortController()
   data.value = null; error.value = ''; hovered.value = -1; pointerY = null
@@ -189,7 +202,7 @@ async function load() {
   scheduleDraw()
   if (!code) return
   try {
-    const res = await fetch(`/api/kline/${encodeURIComponent(code)}?days=${range}`, { signal: controller.signal })
+    const res = await fetch(`/api/kline/${encodeURIComponent(code)}?days=${range}&period=${periodValue}`, { signal: controller.signal })
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}))
       throw new Error(detail.detail || `HTTP ${res.status}`)
@@ -200,7 +213,7 @@ async function load() {
     data.value = result
     scheduleDraw()
   } catch (e) {
-    if (id === sequence && !disposed && e.name !== 'AbortError') error.value = `日K获取失败：${e.message}`
+    if (id === sequence && !disposed && e.name !== 'AbortError') error.value = `K线获取失败：${e.message}`
   } finally {
     if (id === sequence && !disposed) loading.value = false
   }
@@ -275,10 +288,11 @@ function draw() {
   })
   const count = bars.value.length
   const dateIndices = width < 500 ? [0, count - 1] : [0, Math.floor((count - 1) / 2), count - 1]
+  const axisFmt = period.value === 'day' ? (s) => s : (s) => String(s).slice(5, 16) // 分钟K: MM-DD HH:MM
   ctx.fillStyle = color('--text-dim')
   for (const i of new Set(dateIndices)) {
     ctx.textAlign = i === 0 ? 'left' : i === count - 1 ? 'right' : 'center'
-    ctx.fillText(bars.value[i].date, i === 0 ? g.left : i === count - 1 ? g.right : xAt(i), height - 8)
+    ctx.fillText(axisFmt(bars.value[i].date), i === 0 ? g.left : i === count - 1 ? g.right : xAt(i), height - 8)
   }
   if (hovered.value >= 0 && hovered.value < count) {
     const x = xAt(hovered.value), b = bars.value[hovered.value]
@@ -304,7 +318,7 @@ function stepCrosshair(delta) {
   hovered.value = Math.max(0, Math.min(bars.value.length - 1, start + delta))
   pointerY = null; scheduleDraw()
 }
-watch([target, days], load, { flush: 'sync' })
+watch([target, days, period], load)
 onMounted(() => {
   resizeObserver = new ResizeObserver(scheduleDraw)
   resizeObserver.observe(chartHost.value)

@@ -412,7 +412,10 @@ h2 { font-size: 15px; font-weight: 700; color: var(--text); }
 .tq tbody td { padding: 12px 16px; }
 .tq tbody tr.atm { box-shadow: inset 3px 0 0 var(--accent); }
 .tq-wrap { border-radius: var(--radius-lg); }
-.table-wrap { border-radius: var(--radius-lg); background: var(--bg); }
+.table-wrap {
+  border-radius: var(--radius-lg); background: var(--bg);
+  overflow-x: auto; -webkit-overflow-scrolling: touch;  /* 窄屏表格横向滚动（960px 表被 overflow-x:clip 裁掉的修复） */
+}
 .table-wrap thead th { box-shadow: inset 0 -2px 0 var(--border); }
 
 /* ---------- 工具栏 / 筛选卡 ---------- */

@@ -119,3 +119,55 @@ def fetch_tencent_spot(target_code: str) -> dict | None:
         log.warning("tencent spot %s failed: %s", target_code, e)
         return None
     return raw
+
+
+SINA_MINKLINE_URL = (
+    "https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_x=/"
+    "CN_MarketDataService.getKLineData?symbol=sh{code}&scale={scale}&ma=no&datalen={datalen}"
+)
+
+_MINKLINE_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MINKLINE_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+
+def fetch_sina_minkline(target_code: str, scale: int, datalen: int) -> list[dict] | None:
+    """新浪分钟K（scale=5/15/30/60，仅近期根数，不复权）。
+    返回与日K同构的 dict 列表（date/open/close/high/low/volume，date 含时间）；
+    网络失败/结构异常返回 None（不可用），不填默认值。"""
+    import json
+    url = SINA_MINKLINE_URL.format(code=target_code, scale=int(scale), datalen=max(1, int(datalen)))
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8")
+    except Exception as e:
+        log.warning("sina minkline %s scale=%s failed: %s", target_code, scale, e)
+        return None
+    from math import isfinite
+    try:
+        # JSONP 剥壳：/*<script>...*/\nvar _x=([...]);
+        head = "var _x=("
+        body = raw[raw.index(head) + len(head):raw.rindex(");")]
+        rows = json.loads(body)
+        if not isinstance(rows, list) or not rows:
+            return None
+        bars, seen = [], set()
+        for r in rows:
+            if not isinstance(r, dict):
+                return None
+            day = str(r.get("day", ""))
+            if not (_MINKLINE_DT_RE.match(day) or _MINKLINE_DAY_RE.match(day)) or day in seen:
+                return None
+            seen.add(day)
+            o, c, h, l = (float(r[k]) for k in ("open", "close", "high", "low"))
+            if not all(isfinite(v) and v > 0 for v in (o, c, h, l)):
+                return None
+            if not l <= min(o, c) <= max(o, c) <= h:
+                return None
+            volume = float(r["volume"]) if r.get("volume") not in (None, "") else None
+            if volume is not None and (not isfinite(volume) or volume < 0):
+                return None
+            bars.append(dict(date=day, open=o, close=c, high=h, low=l, volume=volume))
+        return bars
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError):
+        log.warning("sina minkline %s scale=%s invalid payload", target_code, scale)
+        return None

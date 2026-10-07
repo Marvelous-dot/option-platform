@@ -1,7 +1,8 @@
 <template>
   <div class="app-shell">
-    <header class="topbar" v-if="!isHome">
-      <router-link to="/" class="brand" title="返回首页">
+    <div class="top-sticky" v-if="!isHome">
+      <header class="topbar">
+        <router-link to="/" class="brand" title="返回首页">
         <span class="brand-logo">V</span>
         <span class="brand-name">海疆期权</span>
         <span class="brand-badge">v2 · 市场数据</span>
@@ -31,8 +32,11 @@
         <router-link to="/kline" class="nav-link">标的K线</router-link>
         <router-link to="/strategy" class="nav-link">策略模拟</router-link>
         <router-link to="/volatility" class="nav-link">波动率</router-link>
+        <router-link to="/screener" class="nav-link">机会筛选</router-link>
       </nav>
-    </header>
+      </header>
+      <TickerBar />
+    </div>
     <main class="main" :class="{ 'main-bare': isHome }">
       <router-view />
     </main>
@@ -58,6 +62,9 @@
       <router-link to="/volatility" class="tabbar-item" :class="{ active: route.path.startsWith('/volatility') }">
         <span class="tb-ic">σ</span><span class="tb-lb">波动率</span>
       </router-link>
+      <router-link to="/screener" class="tabbar-item" :class="{ active: route.path.startsWith('/screener') }">
+        <span class="tb-ic">◎</span><span class="tb-lb">筛选</span>
+      </router-link>
     </nav>
   </div>
 </template>
@@ -65,6 +72,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import TickerBar from './components/TickerBar.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -115,6 +123,9 @@ function hideResults() {
 </script>
 
 <style scoped>
+/* topbar 与常驻行情条作为一个整体吸顶；
+   topbar 自身的 sticky 规则在 wrapper 内等效不动，不冲突 */
+.top-sticky { position: sticky; top: 0; z-index: 100; }
 /* 注意：不要在此设置 .nav 的 display —— 全局移动端媒体查询靠 display:none 隐藏导航，
    scoped 规则 specificity 更高会压过它（历史 bug）。这里只调间距。 */
 .nav { gap: 4px; }

@@ -8,6 +8,7 @@ import Kline from './views/Kline.vue'
 import Strategy from './views/Strategy.vue'
 import Volatility from './views/Volatility.vue'
 import ContractDetail from './views/ContractDetail.vue'
+import Screener from './views/Screener.vue'
 import './styles/global.css'
 
 const router = createRouter({
@@ -19,6 +20,7 @@ const router = createRouter({
     { path: '/kline', component: Kline },
     { path: '/strategy', component: Strategy },
     { path: '/volatility', component: Volatility },
+    { path: '/screener', component: Screener },
     { path: '/contract/:code', component: ContractDetail },
   ],
 })

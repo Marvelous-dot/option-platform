@@ -14,6 +14,10 @@
       <p>忽略手续费、融资、保证金与分红现金流；各行权价处分段线性解析求盈亏平衡点。权利金报价缺失的腿会保留合约身份，但组合盈亏不可用；到期价情景曲线横轴基准为标的参考价（实时现货缺失时取 K 线最近收盘并标 stale）。</p>
     </div>
 
+    <div v-if="deepNote" class="deep-note" role="note">
+      <span class="dn-badge">来自机会筛选</span>{{ deepNote }}
+    </div>
+
     <div class="strategy-layout">
       <aside class="strategy-side">
         <!-- STEP 1 选择策略 -->
@@ -226,7 +230,11 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { buildCustomStrategy, customStrategyAt, PRESET_GROUPS, PRESET_BY_ID, MARKET_PRESETS } from '../utils/strategy.mjs'
+import { resolveLegSpecs } from '../utils/screener.mjs'
+
+const route = useRoute()
 
 const targetOptions = [
   { code: '510050', name: '50ETF（上证50）' },
@@ -243,6 +251,8 @@ const spotSource = ref(null)
 const contracts = ref([])
 const marketError = ref('')
 const contractsLoading = ref(false)
+const deepNote = ref('')
+let pendingLegSpecs = null   // 深链预填的腿规格，等合约列表就绪后 resolve
 
 const legs = reactive([
   { side: 'buy', units: 1, contractId: '' },
@@ -421,6 +431,19 @@ async function fetchContracts() {
     // 新到期日的合约全集：清掉旧选择
     presetSelections.value = []
     for (const leg of legs) if (!contracts.value.some(c => c.contract_id === leg.contractId)) leg.contractId = ''
+    // 深链预填优先于默认自动配对：按信号规格解析真实合约（方向/行权价/腿数全部落位）
+    // 只有成功解析出合约才消耗规格（到期日回落会触发两次 fetch，首次空列表不浪费预填）
+    if (pendingLegSpecs) {
+      const resolved = resolveLegSpecs(pendingLegSpecs, contracts.value, spot.value)
+      if (resolved.some(r => r.contractId)) {
+        legs.forEach((l, i) => {
+          if (!resolved[i]) return
+          l.side = resolved[i].side
+          if (resolved[i].contractId) l.contractId = resolved[i].contractId
+        })
+        pendingLegSpecs = null
+      }
+    }
     // 尚无任何选择 → 自动按参考价配对，直接出图
     if (!activeLegs.value.some(l => l.contractId)) autoAssign()
   } catch (e) {
@@ -432,7 +455,33 @@ async function fetchContracts() {
 }
 
 watch(expiry, () => { fetchContracts() })
-onMounted(() => { fetchExpiries() })
+onMounted(() => {
+  // 深链支持（来自机会筛选页）：
+  //   基础：/strategy?code=510050&expiry=20261125
+  //   预填：&legs=sell:call:2.85,buy:call:out  → 自由组合模式按规格预填腿（side:type:strikeSpec）
+  //   说明：&note=...  → 顶部提示条（如日历价差跨到期日的降级说明）
+  // 先设 target/expiry 再拉到期日列表；到期日不在列表内会被 fetchExpiries 回落到最近值
+  const qc = String(route.query.code || '')
+  if (targetOptions.some(t => t.code === qc)) target.value = qc
+  const qe = String(route.query.expiry || '')
+  if (/^\d{8}$/.test(qe)) expiry.value = qe
+  const ql = String(route.query.legs || '')
+  if (ql) {
+    const specs = ql.split(',').map(seg => {
+      const [side, type, strikeSpec] = seg.split(':')
+      return { side, type, strikeSpec: String(strikeSpec || 'near') }
+    }).filter(x => (x.side === 'buy' || x.side === 'sell') && (x.type === 'call' || x.type === 'put'))
+    if (specs.length) {
+      pendingLegSpecs = specs
+      // 切到自由组合模式并按腿数重建空腿，等 fetchContracts 拿到合约列表后填入
+      presetMode.value = FREE_MODE
+      legs.splice(0, legs.length, ...specs.map(() => ({ side: 'buy', units: 1, contractId: '' })))
+    }
+  }
+  const qn = String(route.query.note || '')
+  if (qn) deepNote.value = qn
+  fetchExpiries()
+})
 
 const availableContracts = computed(() => contracts.value)
 
@@ -564,6 +613,15 @@ function fmtMarketTime(t) {
 h1 { font-size: 23px; } h2 { font-size: 15px; margin: 0 0 10px; }
 p { line-height: 1.7; } .note { color: var(--text-dim); font-size: 12px; font-weight: normal; }
 .assumptions { border-left: 3px solid var(--accent); padding: 12px 16px; background: var(--bg-elevated); border-radius: 0 var(--radius) var(--radius) 0; font-size: 13px; color: var(--text-dim); }
+.deep-note {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid var(--accent); background: var(--accent-glow); border-radius: var(--radius);
+  padding: 11px 14px; font-size: 13px; color: var(--text); line-height: 1.6;
+}
+.dn-badge {
+  flex: none; background: var(--accent); color: var(--accent-ink, #0a0c10);
+  font-size: 11px; font-weight: 800; border-radius: var(--pill); padding: 2px 10px;
+}
 .target-card, .legs-card, .result-card, .metrics article { border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 18px; background: var(--bg); min-width: 0; box-shadow: var(--shadow); }
 .step-card { display: grid; gap: 12px; }
 .step-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
