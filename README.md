@@ -9,11 +9,12 @@ A 股 ETF 期权的行情浏览与策略推演平台。FastAPI + Vue 3 单机部
 - **滚动叙事首页** `/` — 平台功能导览，滚动驱动动画 + 实时行情条
 - **T 型报价** `/tquote` — 按到期日展开的 T 型报价表，ATM 高亮，自动刷新
 - **全量行情** `/quotes` — 全部挂牌合约快照，筛选 / 排序 / 搜索 / moneyness 过滤，导出 CSV
-- **标的 K 线** `/kline` — 60 / 120 / 250 日 K 线 + MA 均线，日 K 落盘缓存
-- **策略模拟** `/strategy` — 三步流程（选策略 → 选标的/到期日 → 选合约），预设 11 种策略 + 自由组合腿，合约按参考价自动配对；分段线性解析盈亏平衡点、最大盈亏、到期价情景滑块
-- **波动率分析** `/volatility` — 数据源 IV 的 smile / term structure
+- **标的 K 线** `/kline` — 日 K（60/120/250）+ 分钟级（5/15/30/60m）+ MA 均线，日 K 落盘缓存
+- **策略模拟** `/strategy` — 三步流程（选策略 → 选标的/到期日 → 选合约），预设 11 种策略 + 自由组合腿，合约按参考价自动配对；分段线性解析盈亏平衡点、最大盈亏、到期价情景滑块；支持深链预填 `?code=&expiry=&legs=`
+- **机会筛选** `/screener` — 四类信号自动扫描：微笑残差（LOO 删除残差 z-score）、C-P IV 价差、期限结构倒挂、市价 vs 理论价（链内中位数校正）；按异常强度排序，每条信号带方向感知的建议策略，「策略」按钮一键深链到策略页预填腿结构
+- **波动率分析** `/volatility` — 数据源 IV 的 smile / term structure + **3D 波动率曲面**（Canvas 正交投影，拖拽旋转 / 缩放 / 悬停查看）
 - **合约详情** `/contract/:code` — 单合约报价、IV、Greeks 快照
-- 移动端底部 TabBar 适配
+- TickerBar 全站常驻行情条（5 标的现价 30s 轮询）；移动端底部 TabBar 适配
 
 ## 技术栈
 
@@ -43,7 +44,7 @@ cd frontend && npm install && npm run build
 | `GET /api/targets` | 标的列表 |
 | `GET /api/tquote/{code}?expiry=` | T 型报价 |
 | `GET /api/quotes/{code}` | 全量行情快照（筛选/分页） |
-| `GET /api/kline/{code}?days=` | 日 K |
+| `GET /api/kline/{code}?days=&period=day\|5m\|15m\|30m\|60m` | 日 K / 分钟 K |
 | `GET /api/expiries/{code}` | 到期日目录 |
 | `GET /api/strategy/market/{code}?expiry=` | 策略页合约快照 + 参考价 |
 | `GET /api/contract/{option_code}` | 单合约详情 |
@@ -51,14 +52,19 @@ cd frontend && npm install && npm run build
 ## 测试
 
 ```bash
-node frontend/tests/../src/utils  # 策略引擎数值回归（60 断言）见 pages-src/test_strategy.mjs
+# 后端
 cd backend && python -m pytest tests/
+
+# 前端引擎（策略 60 断言 / 波动率 / 机会筛选 29 断言，node 直跑）
+node frontend/tests/strategy.test.mjs
+node frontend/tests/volatility.test.mjs
 ```
 
 ## 版本
 
 - **v1.0**（2026-07）— 初版：波动率曲面可视化
 - **v2.0**（2026-10）— 全面重构：滚动叙事首页、六页 UI 设计系统、真实挂牌合约策略模拟引擎、移动端适配
+- **v2.1**（2026-10）— 机会筛选页（四类信号 + 建议策略 + 一键深链预填）、分钟级 K 线、3D 波动率曲面、全站行情条、IV 口径自适应修复
 
 ## License
 
