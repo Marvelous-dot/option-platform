@@ -2,11 +2,12 @@
   <section class="quotes-page">
     <div class="page-head">
       <div class="ph-title">
-        <span class="ph-kicker">ALL CONTRACTS · 筛选 / 排序 / 导出</span>
-        <h1>全量行情</h1>
-        <p class="ph-desc">按标的查看全部挂牌到期合约，点表头排序、点合约进详情。IV / Greeks 为数据源计算值，口径未核验；报价可用不等于实时。</p>
+        <span class="ph-kicker">LIST VIEW · 跨到期日排序 / 搜索 / 导出</span>
+        <h1>合约列表</h1>
+        <p class="ph-desc">与 T 型报价同一份行情：那边按行权价左右对齐看购沽结构，这里把一个标的的全部到期合约摊平成表格，支持排序、筛选、搜索与 CSV 导出。IV / Greeks 为数据源计算值，口径未核验；报价可用不等于实时。</p>
       </div>
       <div class="ph-actions">
+        <router-link class="view-link" to="/tquote">← T 型报价</router-link>
         <button type="button" class="export" @click="exportCsv" :disabled="loading || !data?.rows?.length">导出 CSV</button>
       </div>
     </div>
@@ -74,11 +75,15 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { readState, writeState } from '../utils/remember.mjs'
+// 从 T 型报价的「列表视图」跳来时带 target/expiry，优先于本地记忆值
+const route = useRoute()
+const q = k => (typeof route.query[k] === 'string' ? route.query[k] : '')
 const remembered = readState('quotes', {})
 const targets = ref([]), expiries = ref([])
-const target = ref(remembered.target || '510050')
-const expiry = ref(remembered.expiry || ''), type = ref(remembered.type || ''), money = ref(remembered.money || 'all')
+const target = ref(q('target') || remembered.target || '510050')
+const expiry = ref(q('expiry') || remembered.expiry || ''), type = ref(remembered.type || ''), money = ref(remembered.money || 'all')
 const search = ref(remembered.search || '')
 const sort = ref(remembered.sort || 'option_code'), order = ref(remembered.order || 'asc')
 const data = ref(null), loading = ref(false), error = ref('')
@@ -247,6 +252,9 @@ tbody tr:hover { background: var(--bg-hover); }
 th:first-child, td:first-child, td:last-child { text-align: left; }
 td small { display: block; opacity: .65; margin-top: 5px; font-size: 11px; }
 a { color: var(--accent-ink); font-weight: 600; }
+/* 本页 a 规则会把 .view-link 也染成强调色；用同类选择器加 scoped 属性盖回来 */
+.view-link { color: var(--text-dim); }
+.view-link:hover { color: var(--text); }
 a:hover { text-decoration: underline; }
 [role=alert] { color: var(--err); }
 /* 窄屏：筛选表单单列堆叠、快捷按钮换行、表头不吸顶、表格字号缩小 */

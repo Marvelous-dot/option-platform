@@ -44,7 +44,7 @@ const surface = computed(() => {
     for (const r of g.rows || []) {
       const k = Number(r.strikeValue), iv = Number(r.ivValue)
       if (!Number.isFinite(k) || k <= 0 || !Number.isFinite(iv)) continue
-      if (iv < 0.02 || iv > 2) continue // 深度实值等退化 IV（如 0.0009）剔除
+      if (iv < 2 || iv > 200) continue // ivValue 已统一为百分数（20.5=20.5%）；<2% 深度实值退化值、>200% 伪值剔除
       const side = k < spot ? 'put' : 'call' // OTM 惯例：虚值侧取数
       if (r.option_type !== side) continue
       if (!map.has(k)) map.set(k, { iv, code: r.option_code || '', name: r.name || '' })
@@ -67,7 +67,7 @@ const emptyReason = computed(() =>
   props.groups.length < 2 ? '到期日不足两张，无法构成曲面'
     : !Number.isFinite(Number(props.spot)) ? '标的参考价不可用，无法定位 OTM 侧'
     : '有效 IV 点不足，无法绘制曲面')
-const pct = v => (v * 100).toFixed(1) + '%'
+const pct = v => Number(v).toFixed(1) + '%'   // ivValue 已是百分数，不再 ×100
 const loLabel = computed(() => surface.value ? pct(surface.value.minIv) : '')
 const hiLabel = computed(() => surface.value ? pct(surface.value.maxIv) : '')
 

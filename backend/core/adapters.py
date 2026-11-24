@@ -62,6 +62,93 @@ def fetch_sina_quotes_batch(
     return ok, failed
 
 
+SINA_BOOK_URL = "https://hq.sinajs.cn/list={codes}"
+SINA_BOOK_REFERER = "https://stock.finance.sina.com.cn/"
+
+# 新浪 CON_OP_（期权五档）字段位置，与 akshare option_sse_spot_price_sina 一致：
+# 0 买量 1 买价 2 最新价 3 卖价 4 卖量 5 持仓量 6 涨幅 7 行权价 8 昨收 9 开盘
+# 10 涨停 11 跌停 12 申卖价五 13 申卖量五 … 20 申卖价一 21 申卖量一
+# 22 申买价一 23 申买量一 … 30 申买价五 31 申买量五 32 行情时间
+# 33 主力合约标识 34 状态码 35 标的证券类型 36 标的股票 37 期权合约简称
+# 38 振幅 39 最高价 40 最低价 41 成交量 42 成交额
+_BOOK_MIN_FIELDS = 33
+_I_TS, _I_NAME, _I_VOLUME = 32, 37, 41
+
+
+def _book_num(parts: list[str], idx: int) -> float | None:
+    try:
+        x = float(parts[idx])
+    except (IndexError, TypeError, ValueError):
+        return None
+    return x if x > 0 else None  # 0/负 = 该档无报价，按缺失处理
+
+
+def _parse_book_line(line: str) -> tuple[str, dict] | None:
+    """解析一行 var hq_str_CON_OP_<id>="a,b,c..."; → (id, 五档字段)。"""
+    head = 'hq_str_CON_OP_'
+    i = line.find(head)
+    if i < 0:
+        return None
+    j = line.find('="', i)
+    if j < 0:
+        return None
+    cid = line[i + len(head):j].strip()
+    if not cid or not cid.isdigit():
+        return None
+    body = line[j + 2:line.rfind('"')]
+    if not body:
+        return None
+    parts = body.split(",")
+    if len(parts) < _BOOK_MIN_FIELDS:
+        return None
+    bid, ask = _book_num(parts, 1), _book_num(parts, 3)
+    if bid is None or ask is None or ask < bid:
+        return None
+    ts = parts[_I_TS].strip() or None
+    return cid, {
+        "bid": bid,
+        "ask": ask,
+        "bid_vol": _book_num(parts, 0),
+        "ask_vol": _book_num(parts, 4),
+        "last": _book_num(parts, 2),
+        "open_interest": _book_num(parts, 5),
+        "ts": ts,
+        "name": parts[_I_NAME].strip() if len(parts) > _I_NAME else None,
+        "volume": _book_num(parts, _I_VOLUME),
+    }
+
+
+def fetch_sina_option_book(contract_ids: list[str], chunk: int = 40) -> dict[str, dict]:
+    """新浪期权五档批量行情（CON_OP_）：一次请求可带多个合约。
+
+    返回 {contract_id: {bid, ask, bid_vol, ask_vol, last, ts, name, volume}}；
+    只返回买价卖价都有效（>0 且 ask≥bid）的合约。网络失败按批跳过，
+    绝不抛错打断主行情链路——价差缺失时上层按 None 处理，不补默认值。
+    """
+    out: dict[str, dict] = {}
+    ids = [c for c in dict.fromkeys(contract_ids) if c]
+    for start in range(0, len(ids), chunk):
+        batch = ids[start:start + chunk]
+        codes = ",".join(f"CON_OP_{c}" for c in batch)
+        req = urllib.request.Request(
+            SINA_BOOK_URL.format(codes=codes),
+            headers={"User-Agent": UA, "Referer": SINA_BOOK_REFERER},
+        )
+        try:
+            raw = urllib.request.urlopen(req, timeout=10).read().decode("gbk", "replace")
+        except Exception as e:
+            log.warning("sina book batch %s.. failed: %s", batch[0], e)
+            continue
+        for line in raw.split(";"):
+            parsed = _parse_book_line(line)
+            if not parsed:
+                continue
+            cid, book = parsed
+            if cid in batch:
+                out[cid] = book
+    return out
+
+
 KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh{code},day,,,{days},qfq"
 
 

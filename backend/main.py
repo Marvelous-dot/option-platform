@@ -27,6 +27,16 @@ START_TIME = time.monotonic()
 app.mount("/assets", StaticFiles(directory=DIST / "assets", check_dir=False), name="assets")
 
 
+@app.on_event("startup")
+def _init_iv_store():
+    """历史 IV 库建表；失败只记日志，不影响行情主链路。"""
+    try:
+        from core import ivstore
+        ivstore.init()
+    except Exception:
+        logging.getLogger(__name__).exception("iv store init failed")
+
+
 @app.get("/", include_in_schema=False)
 @app.get("/tquote", include_in_schema=False)
 @app.get("/quotes", include_in_schema=False)
@@ -129,6 +139,45 @@ def api_quotes(target_code: str, expiry: str | None = None,
     except Exception:
         logging.getLogger(__name__).exception("all quotes unavailable")
         raise HTTPException(status_code=503, detail="合约行情暂不可用")
+
+
+@app.get("/api/ivstats")
+def api_ivstats():
+    """五个标的的 IV 水位（IV30 / IVR / IVP / VRP）+ 历史序列。"""
+    service.maybe_snapshot_async()   # 盘后自愈：当日缺快照则后台补写
+    return {"targets": service.iv_stats_all()}
+
+
+@app.get("/api/ivstats/{target_code}")
+def api_ivstats_one(target_code: str):
+    if target_code not in TARGETS:
+        raise HTTPException(status_code=404, detail=f"未知标的 {target_code}")
+    service.maybe_snapshot_async()
+    try:
+        return service.iv_stats(target_code)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logging.getLogger(__name__).exception("iv stats unavailable")
+        raise HTTPException(status_code=503, detail="历史 IV 统计暂不可用")
+
+
+@app.get("/api/ivsnapshot")
+def api_ivsnapshot(force: int = 0, overwrite: int = 0):
+    """手动/定时落盘当日快照。
+
+    force=1 立即同步执行并跳过时点判定（供 cron，已有当日快照仍然跳过）；
+    overwrite=1 覆盖已有快照（修正用）。都不传则只触发后台补写。
+    """
+    if force or overwrite:
+        try:
+            return service.snapshot_iv(force=True, overwrite=bool(overwrite))
+        except Exception as e:
+            logging.getLogger(__name__).exception("iv snapshot failed")
+            raise HTTPException(status_code=503, detail=f"快照落盘失败: {e}")
+    service.maybe_snapshot_async()
+    return {"triggered": True,
+            "detail": "已触发后台补写；仅当为交易日、已过 15:05 且当日缺快照时才会真正写入"}
 
 
 @app.get("/api/kline/{target_code}")

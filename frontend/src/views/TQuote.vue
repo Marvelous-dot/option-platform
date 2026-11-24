@@ -8,9 +8,11 @@
       <div class="ph-title">
         <span class="ph-kicker">REALTIME T-QUOTE · 30S 自动刷新</span>
         <h1>T 型报价</h1>
-        <p class="ph-desc">认购 / 认沽按行权价左右对齐，IV 与 Delta 逐合约展示；行情缺失自动降级 stale 标注，不展示模拟数据。</p>
+        <p class="ph-desc">认购 / 认沽按行权价左右对齐，IV 与 Delta 逐合约展示；行情缺失自动降级 stale 标注，不展示模拟数据。需要跨到期日排序、搜索或导出 CSV 时切到列表视图。</p>
       </div>
       <div class="ph-actions">
+        <router-link class="view-link"
+          :to="{ path: '/quotes', query: { target: selectedTarget, expiry: selectedExpiry } }">列表视图 →</router-link>
         <button class="refresh-toggle" :class="{ on: autoRefresh }" type="button" @click="toggleAuto">
           {{ autoRefresh ? '● 自动刷新中' : '自动刷新已停' }}
         </button>

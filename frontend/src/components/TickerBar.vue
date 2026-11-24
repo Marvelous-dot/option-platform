@@ -91,6 +91,11 @@ onUnmounted(() => { alive = false; if (timer) clearInterval(timer) })
   .tickerbar { padding: 0 14px; gap: 10px; height: 32px; }
   .tb-track { gap: 14px; }
   .tb-note { display: none; }
+  /* 窄屏放不下 5 只标的，右缘数字会被硬切成半截（如 5185）。加渐隐表明"右侧还有，可横滑" */
+  .tb-track {
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .tb-live i { animation: none; }

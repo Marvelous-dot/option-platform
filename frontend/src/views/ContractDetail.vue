@@ -20,6 +20,9 @@
       </div>
       <dl class="metrics">
         <div><dt>最新价（元/份）</dt><dd>{{ fmt(q.last_price) }}</dd></div>
+        <div><dt>买一（元/份）</dt><dd>{{ fmt(q.bid) }}</dd></div>
+        <div><dt>卖一（元/份）</dt><dd>{{ fmt(q.ask) }}</dd></div>
+        <div><dt>价差（占中间价）</dt><dd>{{ q.spread_pct == null ? '--' : q.spread_pct.toFixed(1) + '%' }}</dd></div>
         <div><dt>标的代码</dt><dd>{{ data.contract.target_code }}</dd></div>
         <div><dt>方向</dt><dd>{{ data.contract.option_type === 'call' ? '认购' : '认沽' }}</dd></div>
         <div><dt>行权价</dt><dd>{{ fmt(data.contract.strike) }}</dd></div>

@@ -200,6 +200,14 @@ h2 { font-size: 15px; font-weight: 700; color: var(--text); }
 .refresh-toggle:hover { border-color: var(--accent); }
 .refresh-toggle.on { border-color: var(--accent); background: var(--accent-glow); color: var(--accent-ink); }
 .refresh-cd { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); min-width: 36px; text-align: right; }
+/* 同一份数据的另一种视图入口（T 型报价 ⇄ 列表视图） */
+.view-link {
+  border: 1px solid var(--border); background: var(--bg); color: var(--text-dim);
+  font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: var(--pill);
+  text-decoration: none; white-space: nowrap;
+  transition: border-color .15s, color .15s;
+}
+.view-link:hover { border-color: var(--accent); color: var(--text); }
 
 /* 全局数据时间戳提示条 */
 .ts-bar {

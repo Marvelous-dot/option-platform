@@ -82,13 +82,13 @@
       </div>
     </section>
 
-    <!-- ============ 02 全量行情 ============ -->
+    <!-- ============ 02 合约列表（T 型报价的列表视图） ============ -->
     <section id="quotes" class="feat flip">
       <div class="feat-inner">
         <div class="feat-copy rv">
           <span class="feat-no">02</span>
           <h2>数百行合约，<em>一键</em>筛到底</h2>
-          <p>五只标的全部挂牌合约汇成一张表。按到期月份、虚实值、关键词组合筛选，点列排序，找到目标合约直接跳详情。</p>
+          <p>同一份行情的列表视图：五只标的全部挂牌合约汇成一张表。按到期月份、虚实值、关键词组合筛选，点列排序，找到目标合约直接跳详情。</p>
           <ul class="feat-points">
             <li>到期日 / 虚实值 / 关键词组合筛选</li>
             <li>任意列排序，点击直达合约详情页</li>
@@ -228,7 +228,7 @@ import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 
 const navSections = [
   { id: 'tquote', label: 'T 型报价' },
-  { id: 'quotes', label: '全量行情' },
+  { id: 'quotes', label: '合约列表' },
   { id: 'kline', label: '标的 K 线' },
   { id: 'lab', label: '策略实验室' },
 ]
@@ -358,7 +358,7 @@ const trows = [
   { k: '3.050', cP: '0.0120', cIv: '25.2', pIv: '26.6', pP: '0.1068' },
 ]
 
-/* ---------- 全量行情 mock ---------- */
+/* ---------- 合约列表 mock ---------- */
 const qrows = [
   { code: '10007345', name: '50ETF购10月2900', last: '0.0648', iv: '25.6', dir: 1 },
   { code: '10007351', name: '50ETF沽10月2900', last: '0.0172', iv: '26.2', dir: -1 },

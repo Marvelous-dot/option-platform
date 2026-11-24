@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from core.adapters import (
     fetch_contract_catalog,
+    fetch_sina_option_book,
     fetch_sina_quotes_batch,
     fetch_tencent_spot,
 )
@@ -69,6 +70,9 @@ class OptionService:
         self._catalog_error: str | None = None
         self._tquote_cache: dict[tuple[str, str], tuple[float, dict]] = {}
         self._minkline_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+        self._iv_stats_cache: dict[str, tuple[float, dict]] = {}
+        self._iv_snapshot_tried: str | None = None
+        self._iv_snapshot_lock = threading.Lock()
         self._lock = threading.Lock()
 
     # ---------- 合约目录 ----------
@@ -230,6 +234,158 @@ class OptionService:
             "status_detail": f"筛选结果 {total} 个；本页返回 {len(rows)} 个；报价可用 {ok_n} 个；过期 {stale_n} 个"
                 + ("；标的价格缺失，对应到期日未应用虚实值筛选" if missing_spot else ""),
         }
+
+    # ---------- 历史 IV / IVR ----------
+    #
+    # 落盘时点：交易日 15:05 之后（收盘价已成定局）。cron 是主通道，
+    # maybe_snapshot_async 是自愈通道——服务重启错过 cron 时，当天首次访问会补写。
+
+    IV_SNAPSHOT_AFTER = "15:05"
+
+    def _quote_day(self, rows: list[dict]) -> str | None:
+        """行情自身的交易日 = 各腿 market_ts 日期的众数。拿不到返回 None。"""
+        from collections import Counter
+
+        days: Counter = Counter()
+        for r in rows:
+            ts = r.get("market_ts")
+            if isinstance(ts, str) and len(ts) >= 10 and ts[4] == "-":
+                days[ts[:10]] += 1
+        return days.most_common(1)[0][0] if days else None
+
+    def snapshot_iv(self, *, force: bool = False, overwrite: bool = False,
+                    target_codes: list[str] | None = None) -> dict:
+        """采集全链快照写入 SQLite；幂等。
+
+        归属日按「行情时间」而非系统时间判定：盘前运行时新浪返回的是上一交易日
+        收盘价，若按今天记账就是隐蔽的数据污染。收盘前采到的数据标为 intraday，
+        不进入 IVR 统计，收盘后重采会覆盖。
+        """
+        from collections import Counter
+
+        from core import ivstore
+
+        now = datetime.now(CN)
+        today = now.date().isoformat()
+        codes = list(target_codes or TARGETS.keys())
+        if not force and now.weekday() >= 5:
+            return {"skipped": "非交易日（周末）", "trade_date": today}
+
+        payloads: list[dict] = []
+        quote_days: dict[str, str] = {}
+        for code in codes:
+            if code not in TARGETS:
+                continue
+            try:
+                data = self.all_quotes(code)
+            except Exception as e:
+                log.warning("iv snapshot quote failed for %s: %s", code, e)
+                continue
+            spot = None
+            for row in data.get("rows", []):
+                s = row.get("spot")
+                p = s.get("price") if isinstance(s, dict) else None
+                if isinstance(p, (int, float)) and p > 0:
+                    spot = float(p)
+                    break
+            if spot is None:
+                # 没有标的价就算不出 ATM，整个标的跳过；宁可缺一天也不猜
+                log.warning("iv snapshot skip %s: 标的价缺失", code)
+                continue
+            qd = self._quote_day(data.get("rows", []))
+            if qd:
+                quote_days[code] = qd
+            payloads.append({
+                "code": code, "name": TARGETS[code]["name"], "spot": spot,
+                "rows": data.get("rows", []), "fetched_at": data.get("fetched_at"),
+            })
+        if not payloads:
+            return {"skipped": "无可用报价，未落盘", "trade_date": today}
+
+        day = Counter(quote_days.values()).most_common(1)[0][0] if quote_days else today
+        if day > today:          # 时钟异常防护，不写未来日期
+            day = today
+        intraday = day == today and now.strftime("%H:%M") < self.IV_SNAPSHOT_AFTER
+        if intraday and not force:
+            return {"skipped": f"未到收盘采样时点 {self.IV_SNAPSHOT_AFTER}（行情日为 {day}）",
+                    "trade_date": day}
+        # force 只跳过「时点」判定，仍受已有快照保护（供 cron 每日幂等调用）；
+        # 需要修正历史数据时显式传 overwrite
+        if not intraday and not overwrite and ivstore.has_day(day):
+            return {"skipped": f"{day} 收盘快照已存在", "trade_date": day}
+
+        result = ivstore.write_day(day, payloads, kind="intraday" if intraday else "close")
+        result["quote_days"] = quote_days
+        warnings = []
+        if intraday:
+            warnings.append("盘中数据已标为 intraday，不进入 IVR 统计；收盘后重采会覆盖")
+        if not quote_days:
+            # 集合竞价等时段新浪五档不返回行情时间，此时只能退回系统日期，必须如实标注
+            warnings.append("行情时间缺失，无法确认数据归属日，已按系统日期记账")
+        if warnings:
+            result["warning"] = "；".join(warnings)
+        self._iv_stats_cache.clear()   # 新数据进来，统计缓存作废
+        return result
+
+    def maybe_snapshot_async(self) -> None:
+        """盘后首次被访问时后台补写当日快照；每进程每天最多触发一次。"""
+        now = datetime.now(CN)
+        if now.weekday() >= 5 or now.strftime("%H:%M") < self.IV_SNAPSHOT_AFTER:
+            return
+        today = now.date().isoformat()
+        with self._iv_snapshot_lock:
+            if self._iv_snapshot_tried == today:
+                return
+            self._iv_snapshot_tried = today
+
+        def _run() -> None:
+            try:
+                self.snapshot_iv()
+            except Exception:
+                log.exception("background iv snapshot failed")
+
+        threading.Thread(target=_run, daemon=True, name="iv-snapshot").start()
+
+    def iv_stats(self, target_code: str) -> dict:
+        """IV30 / IVR / IVP / VRP。RV20 用前复权日K算，取不到就留空，不拿 IV 顶替。"""
+        from core import ivstore
+
+        if target_code not in TARGETS:
+            raise ValueError("未知标的")
+        now = time.monotonic()
+        cached = self._iv_stats_cache.get(target_code)
+        if cached and now - cached[0] < 300:
+            return cached[1]
+
+        stats = ivstore.stats(target_code)
+        stats["target_name"] = TARGETS[target_code]["name"]
+        rv20 = None
+        try:
+            payload = self.kline(target_code, days=60)
+            rv20 = ivstore.realized_vol([b.get("close") for b in payload.get("bars", [])], 20)
+            stats["rv_basis"] = payload.get("last_date")
+            stats["rv_status"] = payload.get("data_status")
+        except Exception as e:
+            log.warning("rv20 unavailable for %s: %s", target_code, e)
+            stats["rv_basis"] = None
+            stats["rv_status"] = "unavailable"
+        stats["rv20"] = rv20
+        stats["vrp"] = (stats["iv30"] - rv20) if (stats.get("iv30") is not None and rv20 is not None) else None
+        self._iv_stats_cache[target_code] = (now, stats)
+        return stats
+
+    def iv_stats_all(self) -> list[dict]:
+        out = []
+        for code in TARGETS:
+            try:
+                out.append(self.iv_stats(code))
+            except Exception as e:
+                log.warning("iv stats failed for %s: %s", code, e)
+                out.append({"target_code": code, "target_name": TARGETS[code]["name"],
+                            "data_status": "unavailable", "status_detail": f"统计失败: {e}",
+                            "iv30": None, "ivr": None, "ivp": None, "rv20": None,
+                            "vrp": None, "samples": 0, "min_samples": 20, "series": []})
+        return out
 
     # ---------- 标的日K线 ----------
 
@@ -473,6 +629,13 @@ class OptionService:
         # 3) 并发拉全部腿的实时行情
         ids = [c.contract_id for c in pool]
         ok_kvs, failed_ids = fetch_sina_quotes_batch(ids)
+        # 3b) 五档（买一/卖一 + 行情时间）：greeks 接口不带价差与时间，
+        #     批量补一次，失败不影响主链路（价差字段留 None）
+        try:
+            books = fetch_sina_option_book(ids)
+        except Exception as e:  # pragma: no cover - 适配层已吞异常，双保险
+            log.warning("sina book %s failed: %s", target_code, e)
+            books = {}
         fetched_at = datetime.now(CN).isoformat(timespec="seconds")
         prev_legs: dict[str, dict] = {}
         if previous:
@@ -485,7 +648,9 @@ class OptionService:
         latest_market_ts: str | None = None
         for c in pool:
             kv = ok_kvs.get(c.contract_id)
-            q = normalize_sina_greeks(c.contract_id, kv or {}, fetched_at, None)
+            book = books.get(c.contract_id)
+            q = normalize_sina_greeks(c.contract_id, kv or {}, fetched_at,
+                                      (book or {}).get("ts"), book=book)
             if not q.name:
                 q.name = c.name
             # 身份校验：数据源必须回传与挂牌合约一致的交易代码（fail-closed），

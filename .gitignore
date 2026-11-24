@@ -4,8 +4,12 @@ dist/
 __pycache__/
 *.pyc
 backend/cache/
+backend/data/
 build-preview*/
 *.log
+
+# 测试缓存
+.pytest_cache/
 
 # 本地环境
 .DS_Store

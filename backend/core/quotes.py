@@ -32,6 +32,10 @@ class Quote:
     volume: int | None = None
     high: float | None = None
     low: float | None = None
+    bid: float | None = None            # 买一价（新浪五档）
+    ask: float | None = None            # 卖一价（新浪五档）
+    bid_vol: float | None = None        # 买一量
+    ask_vol: float | None = None        # 卖一量
     theory_price: float | None = None  # 新浪理论价值（交易所参考价，如实标注来源）
     source: str = "sina"
     fetched_at: str | None = None      # 本系统抓取时间
@@ -75,12 +79,21 @@ def ts_freshness(ts: str | None) -> str:
     return "fresh" if dt.date() == datetime.now(CN).date() else "stale"
 
 
-def normalize_sina_greeks(contract_id: str, kv: dict, fetched_at: str, quote_ts: str | None) -> Quote:
+def normalize_sina_greeks(contract_id: str, kv: dict, fetched_at: str, quote_ts: str | None,
+                          book: dict | None = None) -> Quote:
     """新浪 option_sse_greeks_sina 返回 (字段,值) 键值对 → Quote。
 
     最新价为 0 / 缺失 → unavailable（新浪对无行情合约返回空或 0）。
+    book 为同合约的新浪五档（CON_OP_）解析结果：补买一/卖一与行情时间；
+    greeks 接口本身不带时间，market_ts 只能来自五档，取不到就保持 None。
     """
     q = Quote(contract_id=contract_id, fetched_at=fetched_at)
+    if book:
+        q.bid = book.get("bid")
+        q.ask = book.get("ask")
+        q.bid_vol = book.get("bid_vol")
+        q.ask_vol = book.get("ask_vol")
+        quote_ts = quote_ts or book.get("ts")
     if not kv:
         return q
 
@@ -130,6 +143,28 @@ def parse_tencent_spot(raw: str) -> dict | None:
     }
 
 
+_NO_BOOK = {
+    "bid": None, "ask": None, "bid_vol": None, "ask_vol": None,
+    "mid": None, "spread": None, "spread_pct": None,
+}
+
+
+def _book_fields(q: Quote) -> dict:
+    """买一/卖一 + 派生价差。任一侧缺失 → 全部 None（不补默认值、不用最新价冒充）。"""
+    bid, ask = q.bid, q.ask
+    ok = bid is not None and ask is not None and ask >= bid > 0
+    mid = (bid + ask) / 2 if ok else None
+    return {
+        "bid": bid if ok else None,
+        "ask": ask if ok else None,
+        "bid_vol": q.bid_vol if ok else None,
+        "ask_vol": q.ask_vol if ok else None,
+        "mid": mid,
+        "spread": (ask - bid) if ok else None,
+        "spread_pct": ((ask - bid) / mid * 100) if ok else None,
+    }
+
+
 def quote_as_payload(q: Quote, *, expected_option_code: str | None = None) -> dict:
     """Quote → API 输出。
 
@@ -159,6 +194,7 @@ def quote_as_payload(q: Quote, *, expected_option_code: str | None = None) -> di
             "market_ts": None,
             "freshness": fresh,
             "data_status": "unavailable",
+            **_NO_BOOK,  # 无有效行情 → 价差一律 None
         }
     # ok / stale：stale 是带原时间的过期数据，如实保留观测值
     if q.data_status == "stale":
@@ -173,6 +209,7 @@ def quote_as_payload(q: Quote, *, expected_option_code: str | None = None) -> di
         "iv": q.iv, "volume": q.volume,
         "high": q.high, "low": q.low,
         "theory_price": q.theory_price,
+        **_book_fields(q),
         "source": q.source,
         "fetched_at": q.fetched_at,
         "market_ts": q.market_ts,

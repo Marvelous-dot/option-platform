@@ -8,6 +8,15 @@ export function formatIV(value) {
   return n === null ? '不可用' : `${Number(n.toFixed(4))}%`
 }
 
+// 坐标轴刻度专用：4 位小数会把标签撑宽到被 SVG 左边界裁掉（23.6364% 只剩 236%），
+// 且 0 在 formatIV 里按"无效值"处理会显示成"不可用"。刻度是纯展示，压缩到 1~2 位。
+export function formatTick(value) {
+  if (value === null || value === undefined) return '不可用'
+  const n = positive(value)
+  if (n === null) return Number(value) === 0 ? '0%' : '不可用'
+  return `${n < 10 ? n.toFixed(2) : n.toFixed(1)}%`
+}
+
 export function chinaDay(now = new Date()) {
   return new Date(now.getTime() + 8 * 3600000).toISOString().slice(0, 10)
 }
@@ -83,9 +92,13 @@ export function buildVolatility(payload, today = chinaDay()) {
       series: sides.map(side => ({ side, slots: strikes.map(x => ({ x, label: String(x),
         points: groupRows.filter(r => r.option_type === side && r.strikeValue === x) })) })) }
   })
+  // 到期日为 YYYYMMDD（无分隔符），必须先经 sourceDay 归一成 YYYY-MM-DD 再解析，
+  // 否则 `${expiry}T00:00:00Z` = 20261125T00:00:00Z 会解析失败得 NaN → 所有点被判无效，
+  // 期限结构图只剩坐标轴（历史 bug：图上从来没有线）。
   const termSeries = sides.map(side => ({ side, slots: groups.map(g => ({
-    x: sourceDay(g.expiry) ? Date.parse(`${g.expiry}T00:00:00Z`) / 86400000 : null,
-    label: g.expiry, points: [{ ...g.atm[side], option_code: g.atm[side].codes.join(' / '), strike: g.atm.strike }],
+    x: (() => { const day = sourceDay(g.expiry); return day ? Date.parse(`${day}T00:00:00Z`) / 86400000 : null })(),
+    label: g.expiry.length === 8 ? `${g.expiry.slice(4, 6)}-${g.expiry.slice(6, 8)}` : g.expiry,
+    points: [{ ...g.atm[side], option_code: g.atm[side].codes.join(' / '), strike: g.atm.strike }],
   })) }))
   return { rows, expiries, groups, coverage: coverage(rows), termSeries }
 }
@@ -119,8 +132,10 @@ export function plotSeries(series, { minGap = 0, fontSize = 9 } = {}) {
   const minY = ys.length ? Math.min(...ys) : 0, maxY = ys.length ? Math.max(...ys) : 1
   const padding = Math.max((maxY - minY) * .12, maxY * .02, .01)
   const yLow = Math.max(0, minY - padding), yHigh = maxY + padding
-  const x = v => maxX === minX ? 325 : 65 + (v - minX) / (maxX - minX) * 520
-  const y = v => 245 - (v - yLow) / (yHigh - yLow) * 210
+  // 左边距 78 给纵轴刻度留位（刻度右对齐在 x=70），基线 232 与横轴标签 y=255 拉开，
+  // 否则最低刻度会和第一个横轴标签叠在一起。
+  const x = v => maxX === minX ? 333 : 78 + (v - minX) / (maxX - minX) * 510
+  const y = v => 232 - (v - yLow) / (yHigh - yLow) * 202
   const rawTicks = [...new Map(series.flatMap(s => s.slots).filter(s => Number.isFinite(s.x)).map(s => [s.x, { x: x(s.x), label: s.label }])).values()]
   // 窄容器下保持最小水平间距：等距序列从两端向中间隔位取舍，保证首尾标签保留且不重叠
   const ticks = rawTicks.length > 1 && minGap > 0

@@ -28,7 +28,6 @@
       </div>
       <nav class="nav">
         <router-link to="/tquote" class="nav-link">T 型报价</router-link>
-        <router-link to="/quotes" class="nav-link">全量行情</router-link>
         <router-link to="/kline" class="nav-link">标的K线</router-link>
         <router-link to="/strategy" class="nav-link">策略模拟</router-link>
         <router-link to="/volatility" class="nav-link">波动率</router-link>
@@ -49,9 +48,6 @@
     <nav class="tabbar" v-if="!isHome">
       <router-link to="/tquote" class="tabbar-item" :class="{ active: route.path.startsWith('/tquote') }">
         <span class="tb-ic">T</span><span class="tb-lb">T型报价</span>
-      </router-link>
-      <router-link to="/quotes" class="tabbar-item" :class="{ active: route.path.startsWith('/quotes') }">
-        <span class="tb-ic">＄</span><span class="tb-lb">行情</span>
       </router-link>
       <router-link to="/kline" class="tabbar-item" :class="{ active: route.path.startsWith('/kline') }">
         <span class="tb-ic">K</span><span class="tb-lb">K线</span>
