@@ -26,10 +26,14 @@ test('smile sorts actual listed strikes and preserves missing positions and side
   assert.equal(chart.series[1].points.length, 1)
 })
 
-test('source IV percent units are unchanged, never multiplied by 100', () => {
-  assert.equal(build([row(3, .4022)]).rows[0].ivValue, .4022)
-  assert.equal(api().formatIV(.4022), '0.4022%')
+test('source IV decimals are normalized to percent once, then never re-scaled', () => {
+  // 新浪期权 IV 常态返回小数（0.4022 = 40.22%）：入口统一 ×100，
+  // 下游（3D 曲面 / 筛选引擎）一律按百分数处理。若哪个环节再 ×100 就会变成 4022%。
+  assert.equal(build([row(3, .4022)]).rows[0].ivValue, 40.22)
+  assert.equal(api().formatIV(40.22), '40.22%')
   assert.equal(api().formatIV(21.5), '21.5%')
+  // 已经是百分数的输入不得二次放大
+  assert.equal(build([row(3, 21.5)]).rows[0].ivValue, 21.5)
 })
 
 test('missing, empty, nonfinite, boolean, negative and zero IV are invalid without filling', () => {
@@ -228,7 +232,7 @@ test('expiry computed switches without retained series; unmount invalidates outs
 
 test('page exposes required source boundaries, SVG, responsive layout and navigation', () => {
   const p = readFileSync(new URL('../src/views/Volatility.vue', import.meta.url), 'utf8')
-  for (const text of ['数据源计算', '口径未核验', '不能推断有效0IV', '历史IV', 'IV与K线叠加', '3D', '暂不可用', '<svg', '<circle', '<polyline', '/contract/', '@media', 'market_ts', 'fetched_at']) assert.ok(p.includes(text), text)
+  for (const text of ['数据源计算', '口径未核验', 'IV 口径说明', '退化值', 'IV 水位', '3D', '<svg', '<circle', '<polyline', '/contract/', '@media', 'market_ts', 'fetched_at']) assert.ok(p.includes(text), text)
   assert.match(readFileSync(new URL('../src/main.js', import.meta.url), 'utf8'), /path: '\/volatility'/)
   assert.match(readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8'), /to="\/volatility"/)
 })

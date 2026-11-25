@@ -241,7 +241,10 @@ table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nu
 th { background: var(--bg-elevated); position: sticky; top: 0; }
 th, td { padding: 12px 14px; white-space: nowrap; border-bottom: 1px solid var(--border); text-align: right; }
 th { color: var(--text-dim); font-weight: 600; font-size: 12px; }
-th.sortable { cursor: pointer; user-select: none; position: relative; }
+/* 注意：不能写 position: relative —— 它的特异性(0,1,1)压过 th 的 sticky(0,0,1)，
+ * 会让可排序的列表头脱离吸附、只有前几列粘住（表现为表头错位、数据从缝隙透出）。
+ * sticky 本身已是定位元素，::after 的箭头用普通流即可，无需 relative。 */
+th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--text); background: var(--bg-hover); }
 th.sortable::after { content: '↕'; margin-left: 6px; font-size: 12px; opacity: .55; }
 th.sortable:hover::after { opacity: .9; color: var(--accent-ink); }

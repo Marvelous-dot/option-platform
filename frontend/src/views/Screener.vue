@@ -83,6 +83,18 @@
 
     <div v-if="error" class="unavailable">扫描失败：{{ error }}（可点右上角重新扫描重试）</div>
 
+    <!-- 扫描约 20s（5 标的逐链拉取），用表格骨架占位而不是留白：形状先于内容到达 -->
+    <div v-if="scanning && !filtered.length" class="table-card" aria-busy="true" aria-label="正在扫描全市场期权链">
+      <div class="skel-table">
+        <div class="skel-row head">
+          <span v-for="i in 10" :key="'h' + i" class="skel"></span>
+        </div>
+        <div v-for="r in 7" :key="r" class="skel-row">
+          <span v-for="i in 10" :key="i" class="skel"></span>
+        </div>
+      </div>
+    </div>
+
     <div v-if="filtered.length" class="table-card">
       <div class="scroll-hint" aria-hidden="true">← 表格可左右滑动查看全部列 →</div>
       <div class="table-wrap">
@@ -390,6 +402,10 @@ onUnmounted(cleanup)
 }
 
 .sig-table { min-width: 1310px; width: 100%; }   /* 桌面铺满容器；窄屏由 min-width 撑出横滚 */
+/* 骨架屏列宽贴近真实表：强度/价差净额/信号/标的/环境/到期日/行权价/方向·IV/详情/操作 */
+.skel-table .skel-row {
+  grid-template-columns: 40px 76px 66px 76px 56px 84px 56px 82px minmax(0, 1fr) 50px;
+}
 
 .scroll-hint {
   display: none;

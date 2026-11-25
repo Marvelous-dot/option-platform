@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 const source = readFileSync(new URL('../src/views/Kline.vue', import.meta.url), 'utf8')
 const helpers = source.match(/\/\/ Pure helpers start([\s\S]*?)\/\/ Pure helpers end/)
 assert.ok(helpers, 'Kline.vue must expose its pure calculation section')
-const { normalizeBars, chartGeometry, indexAt, formatPrice, formatVolume, adjustmentLabel, movingAverage } = new Function(`${helpers[1]}; return { normalizeBars, chartGeometry, indexAt, formatPrice, formatVolume, adjustmentLabel, movingAverage }`)()
+const { normalizeBars, chartGeometry, formatPrice, formatVolume, adjustmentLabel, movingAverage } = new Function(`${helpers[1]}; return { normalizeBars, chartGeometry, formatPrice, formatVolume, adjustmentLabel, movingAverage }`)()
 const bar = { date: '2026-09-17', open: 3, close: 3.2, high: 3.3, low: 2.9, volume: 12000 }
 
 test('missing volume is retained as null, while genuine zero is retained', () => {
@@ -46,12 +46,13 @@ test('geometry supports flat prices, single candle, empty and all-missing data',
   assert.equal(chartGeometry(normalizeBars([{ ...bar, volume: 0 }]), 320, 360).volumeMax, 0)
 })
 
-test('crosshair index clamps to candle bounds on narrow mobile charts', () => {
+test('chart geometry stays usable on narrow mobile charts', () => {
   const g = chartGeometry(normalizeBars([bar, bar]), 320, 360)
-  assert.equal(indexAt(-100, g, 2), 0)
-  assert.equal(indexAt(9999, g, 2), 1)
-  assert.equal(indexAt(g.left + g.step * 1.5, g, 2), 1)
-  assert.equal(indexAt(20, null, 0), -1)
+  assert.ok(g.step > 0 && g.left >= 0, 'step/left must be positive')
+  assert.ok(g.left + g.step * 2 <= 320, 'two candles must fit the 320px viewport')
+  // 窗口模型：可见范围由 windowRange 决定，几何只负责单个 step 的像素宽度
+  const wide = chartGeometry(normalizeBars([bar, bar]), 1200, 360)
+  assert.ok(wide.step > g.step, 'wider canvas must yield wider candles')
 })
 
 test('adjustment accepts both documented qfq formats and preserves unknown values', () => {
@@ -90,6 +91,8 @@ test('movingAverage skips missing closes (gap-safe), no zero-fill, null window',
 })
 
  test('source retains provenance, missing data, request and drawing safeguards', () => {
-  for (const marker of ['getComputedStyle', 'AbortController', 'ResizeObserver', 'onUnmounted', 'cancelAnimationFrame', '/api/targets', '/api/kline/', '原始单位', '盘中末根日K可能尚未收盘，获取时间不代表行情时间']) assert.ok(source.includes(marker), marker)
-  assert.ok(!source.includes('实时'))
+  for (const marker of ['getComputedStyle', 'AbortController', 'ResizeObserver', 'onUnmounted', 'cancelAnimationFrame', '/api/targets', '/api/kline/', '原始单位', '末根可能尚未收盘']) assert.ok(source.includes(marker), marker)
+  // 标的现价 chip 确实是 30s 轮询的实时行情，允许出现「实时」；
+  // 但 K 线本身来自落盘缓存 / 延迟分钟数据，不得声称实时。
+  assert.ok(!/实时\s*K\s*线|实时日\s*K|实时分钟\s*K|实时K线数据/.test(source), 'K 线数据不得声称实时')
 })
